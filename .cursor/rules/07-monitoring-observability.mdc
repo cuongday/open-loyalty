@@ -1,0 +1,696 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Monitoring & Observability
+
+## Application Monitoring Stack
+
+### 1. Metrics Collection with Micrometer & Prometheus
+```yaml
+# Application properties for metrics
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        spring.data.repository.invocations: true
+      sla:
+        http.server.requests: 50ms,100ms,200ms,500ms,1s,2s
+```
+
+```java
+// Custom metrics configuration
+@Configuration
+public class MetricsConfig {
+    
+    @Bean
+    public TimedAspect timedAspect(MeterRegistry registry) {
+        return new TimedAspect(registry);
+    }
+    
+    @Bean
+    @ConditionalOnMissingBean
+    public MeterFilter meterFilter() {
+        return MeterFilter.deny(id -> {
+            String name = id.getName();
+            // Filter out noisy metrics
+            return name.startsWith("jvm.threads.") || 
+                   name.startsWith("process.") ||
+                   name.startsWith("tomcat.sessions.");
+        });
+    }
+    
+    @Bean
+    public Counter loyaltyTransactionCounter(MeterRegistry registry) {
+        return Counter.builder("loyalty.transactions.total")
+            .description("Total number of loyalty transactions processed")
+            .register(registry);
+    }
+    
+    @Bean
+    public Timer loyaltyRuleExecutionTimer(MeterRegistry registry) {
+        return Timer.builder("loyalty.rules.execution.time")
+            .description("Time taken to execute loyalty rules")
+            .register(registry);
+    }
+    
+    @Bean
+    public Gauge loyaltyActiveCustomersGauge(MeterRegistry registry, CustomerService customerService) {
+        return Gauge.builder("loyalty.customers.active")
+            .description("Number of active loyalty customers")
+            .register(registry, customerService, CustomerService::getActiveCustomerCount);
+    }
+}
+```
+
+### 2. Health Checks Implementation
+```java
+@Component
+public class LoyaltySystemHealthIndicator implements HealthIndicator {
+    
+    private final CustomerService customerService;
+    private final AccountService accountService;
+    private final CampaignService campaignService;
+    private final RedisTemplate<String, String> redisTemplate;
+    
+    @Override
+    public Health health() {
+        Health.Builder status = Health.up();
+        
+        try {
+            // Check database connectivity
+            checkDatabaseHealth(status);
+            
+            // Check Redis connectivity
+            checkRedisHealth(status);
+            
+            // Check business logic health
+            checkBusinessLogicHealth(status);
+            
+            // Check external dependencies
+            checkExternalDependencies(status);
+            
+        } catch (Exception e) {
+            return Health.down(e).build();
+        }
+        
+        return status.build();
+    }
+    
+    private void checkDatabaseHealth(Health.Builder status) {
+        try {
+            long customerCount = customerService.getCustomerCount();
+            status.withDetail("database.customers", customerCount);
+            
+            // Check recent transactions
+            long recentTransactions = accountService.getRecentTransactionCount(Duration.ofMinutes(5));
+            status.withDetail("database.recent_transactions", recentTransactions);
+            
+        } catch (Exception e) {
+            status.down().withDetail("database.error", e.getMessage());
+        }
+    }
+    
+    private void checkRedisHealth(Health.Builder status) {
+        try {
+            String pingResult = redisTemplate.getConnectionFactory()
+                .getConnection().ping();
+            status.withDetail("redis.ping", pingResult);
+            
+            // Check cache hit rate
+            double cacheHitRate = calculateCacheHitRate();
+            status.withDetail("redis.cache_hit_rate", cacheHitRate);
+            
+        } catch (Exception e) {
+            status.down().withDetail("redis.error", e.getMessage());
+        }
+    }
+    
+    private void checkBusinessLogicHealth(Health.Builder status) {
+        try {
+            // Test rule engine
+            boolean ruleEngineHealthy = testRuleEngine();
+            status.withDetail("rule_engine.healthy", ruleEngineHealthy);
+            
+            // Check campaign availability
+            long activeCampaigns = campaignService.getActiveCampaignCount();
+            status.withDetail("campaigns.active_count", activeCampaigns);
+            
+        } catch (Exception e) {
+            status.down().withDetail("business_logic.error", e.getMessage());
+        }
+    }
+}
+```
+
+### 3. Custom Metrics for Business KPIs
+```java
+@Component
+public class BusinessMetricsCollector {
+    
+    private final MeterRegistry meterRegistry;
+    private final Counter customerRegistrations;
+    private final Counter pointsEarned;
+    private final Counter pointsRedeemed;
+    private final Counter campaignRedemptions;
+    private final Timer transactionProcessingTime;
+    
+    public BusinessMetricsCollector(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+        
+        this.customerRegistrations = Counter.builder("loyalty.customers.registrations")
+            .description("Total customer registrations")
+            .register(meterRegistry);
+            
+        this.pointsEarned = Counter.builder("loyalty.points.earned")
+            .description("Total points earned by customers")
+            .register(meterRegistry);
+            
+        this.pointsRedeemed = Counter.builder("loyalty.points.redeemed")
+            .description("Total points redeemed by customers")
+            .register(meterRegistry);
+            
+        this.campaignRedemptions = Counter.builder("loyalty.campaigns.redemptions")
+            .description("Total campaign redemptions")
+            .register(meterRegistry);
+            
+        this.transactionProcessingTime = Timer.builder("loyalty.transactions.processing.time")
+            .description("Time to process loyalty transactions")
+            .register(meterRegistry);
+    }
+    
+    public void recordCustomerRegistration(String segment) {
+        customerRegistrations.increment(Tags.of("segment", segment));
+    }
+    
+    public void recordPointsEarned(BigDecimal points, String ruleType) {
+        pointsEarned.increment(Tags.of("rule_type", ruleType), points.doubleValue());
+    }
+    
+    public void recordPointsRedeemed(BigDecimal points, String campaignType) {
+        pointsRedeemed.increment(Tags.of("campaign_type", campaignType), points.doubleValue());
+    }
+    
+    public void recordCampaignRedemption(String campaignType, String customerLevel) {
+        campaignRedemptions.increment(Tags.of(
+            "campaign_type", campaignType,
+            "customer_level", customerLevel
+        ));
+    }
+    
+    public Timer.Sample startTransactionTimer() {
+        return Timer.start(meterRegistry);
+    }
+    
+    public void recordTransactionTime(Timer.Sample sample, String transactionType, boolean success) {
+        sample.stop(transactionProcessingTime.tags(
+            "type", transactionType,
+            "success", String.valueOf(success)
+        ));
+    }
+}
+```
+
+## Distributed Tracing
+
+### 1. Zipkin/Jaeger Integration
+```yaml
+# Tracing configuration
+spring:
+  sleuth:
+    zipkin:
+      base-url: http://zipkin:9411
+    sampler:
+      probability: 0.1 # Sample 10% of requests
+  application:
+    name: loyalty-service
+```
+
+```java
+@Configuration
+public class TracingConfig {
+    
+    @Bean
+    public Sampler customSampler() {
+        return ProbabilitySampler.create(0.1f);
+    }
+    
+    @Bean
+    public SpanCustomizer spanCustomizer() {
+        return span -> {
+            span.tag("service.type", "loyalty");
+            span.tag("service.version", getClass().getPackage().getImplementationVersion());
+        };
+    }
+}
+
+// Custom span annotations
+@Component
+public class TracingService {
+    
+    private final Tracer tracer;
+    
+    @NewSpan("customer-registration")
+    public Customer registerCustomer(@SpanTag("customerId") String customerId, 
+                                   RegisterCustomerRequest request) {
+        
+        Span span = tracer.nextSpan()
+            .name("customer-registration")
+            .tag("customer.email", request.getEmail())
+            .tag("customer.segment", request.getSegment())
+            .start();
+            
+        try (Tracer.SpanInScope ws = tracer.withSpanInScope(span)) {
+            // Registration logic
+            Customer customer = performRegistration(request);
+            
+            span.tag("registration.success", "true");
+            span.tag("customer.level", customer.getLevel());
+            
+            return customer;
+        } catch (Exception e) {
+            span.tag("registration.success", "false");
+            span.tag("error.message", e.getMessage());
+            throw e;
+        } finally {
+            span.end();
+        }
+    }
+    
+    @NewSpan("points-calculation")
+    public PointsCalculationResult calculatePoints(@SpanTag("customerId") String customerId,
+                                                  @SpanTag("transactionId") String transactionId,
+                                                  TransactionDetails transaction) {
+        
+        Span span = tracer.nextSpan()
+            .name("points-calculation")
+            .tag("transaction.amount", transaction.getAmount().toString())
+            .tag("transaction.channel", transaction.getChannel())
+            .start();
+            
+        try (Tracer.SpanInScope ws = tracer.withSpanInScope(span)) {
+            PointsCalculationResult result = performPointsCalculation(customerId, transaction);
+            
+            span.tag("points.earned", String.valueOf(result.getPointsEarned()));
+            span.tag("rules.applied", String.valueOf(result.getRulesApplied()));
+            
+            return result;
+        } finally {
+            span.end();
+        }
+    }
+}
+```
+
+### 2. Cross-Service Correlation
+```java
+@Component
+public class CorrelationService {
+    
+    private static final String CORRELATION_ID_HEADER = "X-Correlation-ID";
+    private static final String REQUEST_ID_HEADER = "X-Request-ID";
+    
+    @EventListener
+    public void handleCustomerEvent(CustomerRegisteredEvent event) {
+        // Preserve correlation context across services
+        String correlationId = getCurrentCorrelationId();
+        
+        // Add correlation context to event
+        event.getMetadata().put("correlationId", correlationId);
+        event.getMetadata().put("traceId", getCurrentTraceId());
+        
+        // Publish event with tracing context
+        eventPublisher.publish(event);
+    }
+    
+    private String getCurrentCorrelationId() {
+        return MDC.get("correlationId");
+    }
+    
+    private String getCurrentTraceId() {
+        Span currentSpan = tracer.currentSpan();
+        return currentSpan != null ? currentSpan.context().traceId() : null;
+    }
+}
+
+// Correlation filter for HTTP requests
+@Component
+public class CorrelationInterceptor implements HandlerInterceptor {
+    
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+        String correlationId = request.getHeader(CORRELATION_ID_HEADER);
+        if (correlationId == null) {
+            correlationId = UUID.randomUUID().toString();
+        }
+        
+        String requestId = request.getHeader(REQUEST_ID_HEADER);
+        if (requestId == null) {
+            requestId = UUID.randomUUID().toString();
+        }
+        
+        MDC.put("correlationId", correlationId);
+        MDC.put("requestId", requestId);
+        
+        response.setHeader(CORRELATION_ID_HEADER, correlationId);
+        response.setHeader(REQUEST_ID_HEADER, requestId);
+        
+        return true;
+    }
+    
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, 
+                              Object handler, Exception ex) {
+        MDC.clear();
+    }
+}
+```
+
+## Logging Strategy
+
+### 1. Structured Logging with Logback
+```xml
+<!-- logback-spring.xml -->
+<configuration>
+    <springProfile name="!local">
+        <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+                <providers>
+                    <timestamp/>
+                    <logLevel/>
+                    <loggerName/>
+                    <mdc/>
+                    <arguments/>
+                    <message/>
+                    <stackTrace/>
+                </providers>
+            </encoder>
+        </appender>
+    </springProfile>
+    
+    <springProfile name="local">
+        <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level [%X{correlationId}] %logger{36} - %msg%n</pattern>
+            </encoder>
+        </appender>
+    </springProfile>
+    
+    <!-- Async appender for performance -->
+    <appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="STDOUT"/>
+        <queueSize>1024</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+    </appender>
+    
+    <root level="INFO">
+        <appender-ref ref="ASYNC"/>
+    </root>
+    
+    <!-- Service-specific loggers -->
+    <logger name="com.loyalty.customer" level="DEBUG"/>
+    <logger name="com.loyalty.points" level="DEBUG"/>
+    <logger name="com.loyalty.rules" level="INFO"/>
+    
+    <!-- Security logging -->
+    <logger name="SECURITY" level="INFO" additivity="false">
+        <appender-ref ref="SECURITY_APPENDER"/>
+    </logger>
+</configuration>
+```
+
+```java
+// Structured logging service
+@Service
+@Slf4j
+public class StructuredLoggingService {
+    
+    private final ObjectMapper objectMapper;
+    
+    public void logBusinessEvent(String eventType, Object eventData) {
+        try {
+            String eventJson = objectMapper.writeValueAsString(eventData);
+            
+            log.info("Business event occurred: type={}, data={}", 
+                eventType, eventJson);
+                
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize event data", e);
+        }
+    }
+    
+    public void logSecurityEvent(String action, String resource, String userId, boolean success) {
+        LoggerFactory.getLogger("SECURITY").info(
+            "Security event: action={}, resource={}, user={}, success={}", 
+            action, resource, userId, success);
+    }
+    
+    public void logPerformanceMetric(String operation, long durationMs, Map<String, Object> context) {
+        log.info("Performance metric: operation={}, duration={}ms, context={}", 
+            operation, durationMs, context);
+    }
+    
+    public void logBusinessRule(String ruleId, String customerId, Object ruleInput, Object ruleOutput) {
+        log.info("Rule execution: ruleId={}, customerId={}, input={}, output={}", 
+            ruleId, customerId, ruleInput, ruleOutput);
+    }
+}
+```
+
+### 2. Log Aggregation with ELK Stack
+```yaml
+# Filebeat configuration for log shipping
+filebeat.inputs:
+- type: log
+  enabled: true
+  paths:
+    - /var/log/loyalty-services/*.log
+  fields:
+    service: loyalty-platform
+    environment: production
+  fields_under_root: true
+  
+  # Multiline pattern for stack traces
+  multiline.pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+  multiline.negate: true
+  multiline.match: after
+
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+  index: "loyalty-logs-%{+yyyy.MM.dd}"
+  
+processors:
+- add_host_metadata:
+    when.not.contains.tags: forwarded
+```
+
+```java
+// Log analysis utilities
+@Component
+public class LogAnalyticsService {
+    
+    private final ElasticsearchTemplate elasticsearchTemplate;
+    
+    public ErrorAnalysisReport analyzeErrors(LocalDateTime startTime, LocalDateTime endTime) {
+        SearchQuery searchQuery = new NativeSearchQueryBuilder()
+            .withQuery(QueryBuilders.boolQuery()
+                .must(QueryBuilders.termQuery("level", "ERROR"))
+                .must(QueryBuilders.rangeQuery("@timestamp")
+                    .gte(startTime)
+                    .lte(endTime)))
+            .withAggregations(
+                AggregationBuilders.terms("by_service").field("service"),
+                AggregationBuilders.terms("by_error_type").field("exception.class"),
+                AggregationBuilders.dateHistogram("over_time")
+                    .field("@timestamp")
+                    .calendarInterval(DateHistogramInterval.HOUR))
+            .build();
+            
+        SearchResponse response = elasticsearchTemplate.search(searchQuery, Map.class);
+        return parseErrorAnalysis(response);
+    }
+    
+    public List<PerformanceAlert> detectPerformanceAnomalies() {
+        // Query for slow requests
+        SearchQuery slowRequestQuery = new NativeSearchQueryBuilder()
+            .withQuery(QueryBuilders.boolQuery()
+                .must(QueryBuilders.termQuery("message", "Performance metric"))
+                .must(QueryBuilders.rangeQuery("duration")
+                    .gte(5000))) // > 5 seconds
+            .withSort(SortBuilders.fieldSort("@timestamp").order(SortOrder.DESC))
+            .withPageable(PageRequest.of(0, 100))
+            .build();
+            
+        return elasticsearchTemplate.search(slowRequestQuery, Map.class)
+            .getContent()
+            .stream()
+            .map(this::mapToPerformanceAlert)
+            .collect(Collectors.toList());
+    }
+}
+```
+
+## Alerting & Monitoring Dashboards
+
+### 1. Prometheus Alerting Rules
+```yaml
+# alerts.yml
+groups:
+- name: loyalty.rules
+  rules:
+  - alert: HighErrorRate
+    expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High error rate detected"
+      description: "Error rate is {{ $value }} errors per second"
+      
+  - alert: HighResponseTime
+    expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: "High response time detected"
+      description: "95th percentile response time is {{ $value }} seconds"
+      
+  - alert: LoyaltyPointsProcessingStalled
+    expr: increase(loyalty_points_earned_total[10m]) == 0
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Points processing appears stalled"
+      description: "No points have been earned in the last 10 minutes"
+      
+  - alert: DatabaseConnectionIssues
+    expr: up{job="loyalty-database"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Database connection down"
+      description: "Cannot connect to loyalty database"
+      
+  - alert: RedisConnectionIssues
+    expr: redis_up == 0
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Redis connection issues"
+      description: "Redis cache is unavailable"
+```
+
+### 2. Grafana Dashboard Configuration
+```json
+{
+  "dashboard": {
+    "title": "Loyalty Platform Overview",
+    "panels": [
+      {
+        "title": "Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total[5m])",
+            "legendFormat": "{{service}} - {{status}}"
+          }
+        ]
+      },
+      {
+        "title": "Response Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "95th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "50th percentile"
+          }
+        ]
+      },
+      {
+        "title": "Business Metrics",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "loyalty_customers_active",
+            "legendFormat": "Active Customers"
+          },
+          {
+            "expr": "rate(loyalty_points_earned_total[1h]) * 3600",
+            "legendFormat": "Points Earned/Hour"
+          },
+          {
+            "expr": "rate(loyalty_campaigns_redemptions_total[1h]) * 3600",
+            "legendFormat": "Redemptions/Hour"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 3. Alert Integration with PagerDuty/Slack
+```java
+@Service
+public class AlertingService {
+    
+    private final NotificationClient notificationClient;
+    private final AlertRepository alertRepository;
+    
+    @EventListener
+    public void handleCriticalAlert(CriticalAlertEvent event) {
+        Alert alert = Alert.builder()
+            .type(event.getAlertType())
+            .severity(AlertSeverity.CRITICAL)
+            .message(event.getMessage())
+            .service(event.getServiceName())
+            .timestamp(LocalDateTime.now())
+            .build();
+            
+        alertRepository.save(alert);
+        
+        // Send to PagerDuty for critical alerts
+        if (event.getSeverity() == AlertSeverity.CRITICAL) {
+            notificationClient.sendPagerDutyAlert(alert);
+        }
+        
+        // Send to Slack for all alerts
+        notificationClient.sendSlackAlert(alert);
+        
+        // Check for alert escalation
+        checkAlertEscalation(alert);
+    }
+    
+    private void checkAlertEscalation(Alert alert) {
+        List<Alert> recentAlerts = alertRepository.findRecentAlerts(
+            alert.getService(), 
+            Duration.ofMinutes(30)
+        );
+        
+        if (recentAlerts.size() > 5) {
+            // Escalate to management
+            notificationClient.sendEscalationAlert(alert, recentAlerts);
+        }
+    }
+}
+```

@@ -1,0 +1,61 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: api-gateway
+  
+  # Cấu hình Spring Cloud Gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          # Global CORS configuration
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowedOrigins: "*"
+                allowedMethods: "*"
+                allowedHeaders: "*"
+                
+          # Route configurations - Sẽ thêm khi có services
+          routes: []
+
+# Cấu hình Eureka Client
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+    register-with-eureka: true
+    fetch-registry: true
+    initial-instance-info-replication-interval-seconds: 5
+    instance-info-replication-interval-seconds: 10
+  instance:
+    lease-renewal-interval-in-seconds: 30
+    lease-expiration-duration-in-seconds: 90
+    metadata-map:
+      zone: default
+
+# Cấu hình Resilience4J Circuit Breaker (sẽ cấu hình khi có services)
+# resilience4j:
+#   circuitbreaker:
+#     instances:
+
+# Cấu hình Actuator để monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
+  endpoint:
+    health:
+      show-details: always
+    gateway:
+      access: unrestricted
+
+# Logging configuration
+logging:
+  level:
+    org.springframework.cloud.gateway: DEBUG
+    org.springframework.cloud.netflix.eureka: DEBUG
+    com.ndc.api_gateway: DEBUG 

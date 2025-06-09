@@ -1,0 +1,669 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Business Rules Engine
+
+## Drools Rule Engine Integration
+
+### 1. Rule Engine Configuration
+```java
+@Configuration
+@EnableConfigurationProperties(DroolsProperties.class)
+public class DroolsConfig {
+    
+    @Autowired
+    private DroolsProperties droolsProperties;
+    
+    @Bean
+    public KieContainer kieContainer() {
+        KieServices kieServices = KieServices.Factory.get();
+        KieFileSystem kieFileSystem = kieServices.newKieFileSystem();
+        
+        // Load rule files from classpath
+        loadRuleFiles(kieFileSystem);
+        
+        KieBuilder kieBuilder = kieServices.newKieBuilder(kieFileSystem);
+        kieBuilder.buildAll();
+        
+        if (kieBuilder.getResults().hasMessages(Level.ERROR)) {
+            throw new RuntimeException("Rule compilation errors: " + 
+                kieBuilder.getResults().toString());
+        }
+        
+        return kieServices.newKieContainer(kieBuilder.getKieModule().getReleaseId());
+    }
+    
+    @Bean
+    public KieSession kieSession(KieContainer kieContainer) {
+        KieSession kieSession = kieContainer.newKieSession();
+        
+        // Add global variables
+        kieSession.setGlobal("logger", LoggerFactory.getLogger(DroolsConfig.class));
+        
+        return kieSession;
+    }
+    
+    private void loadRuleFiles(KieFileSystem kieFileSystem) {
+        try {
+            Resource[] resources = ResourcePatternUtils.getResourcePatternResolver(
+                new DefaultResourceLoader()).getResources("classpath*:rules/**/*.drl");
+            
+            for (Resource resource : resources) {
+                kieFileSystem.write("src/main/resources/" + resource.getFilename(),
+                    resource);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to load rule files", e);
+        }
+    }
+}
+```
+
+### 2. Rule Engine Service
+```java
+@Service
+@Slf4j
+public class RuleEngineService {
+    
+    private final KieSession kieSession;
+    private final RuleExecutionAuditor ruleAuditor;
+    
+    public RuleEngineService(KieSession kieSession, RuleExecutionAuditor ruleAuditor) {
+        this.kieSession = kieSession;
+        this.ruleAuditor = ruleAuditor;
+    }
+    
+    public <T> RuleExecutionResult<T> executeRules(T fact, String agenda) {
+        long startTime = System.currentTimeMillis();
+        
+        try {
+            // Clear previous facts
+            kieSession.getObjects().forEach(kieSession::delete);
+            
+            // Insert new fact
+            FactHandle factHandle = kieSession.insert(fact);
+            
+            // Set agenda filter if provided
+            if (agenda != null) {
+                kieSession.getAgenda().getAgendaGroup(agenda).setFocus();
+            }
+            
+            // Execute rules
+            int rulesExecuted = kieSession.fireAllRules();
+            
+            // Get updated fact
+            T updatedFact = (T) kieSession.getObject(factHandle);
+            
+            long executionTime = System.currentTimeMillis() - startTime;
+            
+            RuleExecutionResult<T> result = RuleExecutionResult.<T>builder()
+                .fact(updatedFact)
+                .rulesExecuted(rulesExecuted)
+                .executionTimeMs(executionTime)
+                .success(true)
+                .build();
+                
+            // Audit rule execution
+            ruleAuditor.auditExecution(fact, result);
+            
+            return result;
+            
+        } catch (Exception e) {
+            log.error("Rule execution failed", e);
+            
+            return RuleExecutionResult.<T>builder()
+                .fact(fact)
+                .rulesExecuted(0)
+                .executionTimeMs(System.currentTimeMillis() - startTime)
+                .success(false)
+                .errorMessage(e.getMessage())
+                .build();
+        }
+    }
+    
+    public void reloadRules() {
+        // Dynamic rule reloading
+        KieContainer kieContainer = kieSession.getKieBase().getKieContainer();
+        // Implementation for hot reloading rules
+    }
+}
+```
+
+## Earning Rules Implementation
+
+### 1. Points Earning Rule Types
+```java
+// Base earning rule fact
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class EarningRuleFact {
+    private String ruleId;
+    private String ruleType;
+    private String customerId;
+    private TransactionFact transaction;
+    private CustomerFact customer;
+    private int pointsEarned;
+    private boolean ruleApplied;
+    private String reason;
+    private Map<String, Object> metadata = new HashMap<>();
+}
+
+// Transaction fact for rule evaluation
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class TransactionFact {
+    private String transactionId;
+    private String customerId;
+    private BigDecimal totalAmount;
+    private BigDecimal taxAmount;
+    private BigDecimal deliveryAmount;
+    private String currency;
+    private LocalDateTime transactionDate;
+    private String channel; // ONLINE, POS, MOBILE
+    private String storeId;
+    private List<TransactionItemFact> items;
+    private Map<String, Object> metadata = new HashMap<>();
+}
+
+// Customer fact for rule evaluation
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class CustomerFact {
+    private String customerId;
+    private String status;
+    private String level;
+    private String segment;
+    private LocalDateTime registrationDate;
+    private LocalDateTime lastTransactionDate;
+    private BigDecimal totalSpent;
+    private int transactionCount;
+    private Set<String> tags = new HashSet<>();
+    private Map<String, Object> attributes = new HashMap<>();
+}
+```
+
+### 2. Drools Rule Examples
+```drools
+// Points for purchase amount rule
+rule "Points for Purchase Amount"
+agenda-group "earning-rules"
+when
+    $rule : EarningRuleFact(ruleType == "POINTS_FOR_AMOUNT", !ruleApplied)
+    $transaction : TransactionFact() from $rule.transaction
+    $customer : CustomerFact() from $rule.customer
+    eval($transaction.getTotalAmount().compareTo(new BigDecimal("10.00")) >= 0)
+then
+    int points = $transaction.getTotalAmount().multiply(new BigDecimal("0.1")).intValue();
+    $rule.setPointsEarned(points);
+    $rule.setRuleApplied(true);
+    $rule.setReason("Earned " + points + " points for purchase amount: $" + $transaction.getTotalAmount());
+    update($rule);
+end
+
+// Bonus points for first purchase
+rule "First Purchase Bonus"
+agenda-group "earning-rules"
+when
+    $rule : EarningRuleFact(ruleType == "FIRST_PURCHASE_BONUS", !ruleApplied)
+    $customer : CustomerFact(transactionCount == 1) from $rule.customer
+then
+    $rule.setPointsEarned(100);
+    $rule.setRuleApplied(true);
+    $rule.setReason("First purchase bonus: 100 points");
+    update($rule);
+end
+
+// Level-based multiplier rule
+rule "Gold Level Multiplier"
+agenda-group "earning-rules"
+when
+    $rule : EarningRuleFact(ruleType == "LEVEL_MULTIPLIER", !ruleApplied)
+    $customer : CustomerFact(level == "GOLD") from $rule.customer
+    $transaction : TransactionFact() from $rule.transaction
+then
+    int basePoints = $transaction.getTotalAmount().multiply(new BigDecimal("0.1")).intValue();
+    int bonusPoints = (int) (basePoints * 0.5); // 50% bonus for Gold level
+    $rule.setPointsEarned(bonusPoints);
+    $rule.setRuleApplied(true);
+    $rule.setReason("Gold level bonus: " + bonusPoints + " extra points");
+    update($rule);
+end
+
+// Product category bonus rule
+rule "Electronics Category Bonus"
+agenda-group "earning-rules"
+when
+    $rule : EarningRuleFact(ruleType == "CATEGORY_BONUS", !ruleApplied)
+    $transaction : TransactionFact() from $rule.transaction
+    $item : TransactionItemFact(category == "ELECTRONICS") from $transaction.items
+then
+    int bonusPoints = $item.getTotalPrice().multiply(new BigDecimal("0.05")).intValue();
+    $rule.setPointsEarned($rule.getPointsEarned() + bonusPoints);
+    $rule.setRuleApplied(true);
+    $rule.setReason("Electronics category bonus: " + bonusPoints + " points");
+    update($rule);
+end
+
+// Weekend purchase bonus
+rule "Weekend Purchase Bonus"
+agenda-group "earning-rules"
+when
+    $rule : EarningRuleFact(ruleType == "WEEKEND_BONUS", !ruleApplied)
+    $transaction : TransactionFact() from $rule.transaction
+    eval(isWeekend($transaction.getTransactionDate()))
+then
+    int bonusPoints = 50;
+    $rule.setPointsEarned(bonusPoints);
+    $rule.setRuleApplied(true);
+    $rule.setReason("Weekend purchase bonus: " + bonusPoints + " points");
+    update($rule);
+end
+
+// Minimum order value rule
+rule "Minimum Order for Points"
+agenda-group "earning-rules"
+when
+    $rule : EarningRuleFact(ruleType == "POINTS_FOR_AMOUNT", !ruleApplied)
+    $transaction : TransactionFact() from $rule.transaction
+    eval($transaction.getTotalAmount().compareTo(new BigDecimal("25.00")) < 0)
+then
+    $rule.setPointsEarned(0);
+    $rule.setRuleApplied(true);
+    $rule.setReason("Minimum order value of $25.00 required for points");
+    update($rule);
+end
+```
+
+### 3. Campaign Eligibility Rules
+```drools
+// Campaign eligibility for VIP customers
+rule "VIP Campaign Eligibility"
+agenda-group "campaign-eligibility"
+when
+    $eligibility : CampaignEligibilityFact(!eligible)
+    $customer : CustomerFact(segment == "VIP") from $eligibility.customer
+    $campaign : CampaignFact(targetSegment == "VIP") from $eligibility.campaign
+then
+    $eligibility.setEligible(true);
+    $eligibility.setReason("VIP segment eligibility");
+    update($eligibility);
+end
+
+// Level-based campaign eligibility
+rule "Gold Level Campaign Access"
+agenda-group "campaign-eligibility"
+when
+    $eligibility : CampaignEligibilityFact(!eligible)
+    $customer : CustomerFact(level == "GOLD" || level == "PLATINUM") from $eligibility.customer
+    $campaign : CampaignFact(minimumLevel == "GOLD") from $eligibility.campaign
+then
+    $eligibility.setEligible(true);
+    $eligibility.setReason("Gold level or higher eligibility");
+    update($eligibility);
+end
+
+// Spending threshold eligibility
+rule "High Spender Campaign"
+agenda-group "campaign-eligibility"
+when
+    $eligibility : CampaignEligibilityFact(!eligible)
+    $customer : CustomerFact() from $eligibility.customer
+    $campaign : CampaignFact() from $eligibility.campaign
+    eval($customer.getTotalSpent().compareTo($campaign.getMinimumSpend()) >= 0)
+then
+    $eligibility.setEligible(true);
+    $eligibility.setReason("Minimum spend threshold met: $" + $campaign.getMinimumSpend());
+    update($eligibility);
+end
+
+// Exclusion rule for suspended customers
+rule "Exclude Suspended Customers"
+agenda-group "campaign-eligibility"
+when
+    $eligibility : CampaignEligibilityFact(eligible)
+    $customer : CustomerFact(status == "SUSPENDED") from $eligibility.customer
+then
+    $eligibility.setEligible(false);
+    $eligibility.setReason("Customer account suspended");
+    update($eligibility);
+end
+```
+
+## Rule Management System
+
+### 1. Dynamic Rule Management
+```java
+@Service
+public class RuleManagementService {
+    
+    private final RuleRepository ruleRepository;
+    private final KieSession kieSession;
+    private final RuleCompiler ruleCompiler;
+    
+    public Rule createRule(CreateRuleRequest request) {
+        // Validate rule syntax
+        validateRuleSyntax(request.getRuleContent());
+        
+        Rule rule = Rule.builder()
+            .name(request.getName())
+            .description(request.getDescription())
+            .ruleType(request.getRuleType())
+            .priority(request.getPriority())
+            .content(request.getRuleContent())
+            .status(RuleStatus.DRAFT)
+            .version(1)
+            .createdAt(LocalDateTime.now())
+            .build();
+            
+        return ruleRepository.save(rule);
+    }
+    
+    public void activateRule(String ruleId) {
+        Rule rule = ruleRepository.findById(ruleId)
+            .orElseThrow(() -> new RuleNotFoundException("Rule not found: " + ruleId));
+            
+        // Compile and validate rule
+        CompiledRule compiledRule = ruleCompiler.compile(rule.getContent());
+        
+        if (compiledRule.hasErrors()) {
+            throw new RuleCompilationException("Rule compilation failed: " + 
+                compiledRule.getErrors());
+        }
+        
+        // Update rule status
+        rule.setStatus(RuleStatus.ACTIVE);
+        rule.setActivatedAt(LocalDateTime.now());
+        ruleRepository.save(rule);
+        
+        // Hot deploy to rule engine
+        deployRuleToEngine(compiledRule);
+    }
+    
+    public void deactivateRule(String ruleId) {
+        Rule rule = ruleRepository.findById(ruleId)
+            .orElseThrow(() -> new RuleNotFoundException("Rule not found: " + ruleId));
+            
+        rule.setStatus(RuleStatus.INACTIVE);
+        rule.setDeactivatedAt(LocalDateTime.now());
+        ruleRepository.save(rule);
+        
+        // Remove from rule engine
+        removeRuleFromEngine(rule.getName());
+    }
+    
+    private void validateRuleSyntax(String ruleContent) {
+        try {
+            DrlParser parser = new DrlParser(LanguageLevelOption.DRL6);
+            PackageDescr packageDescr = parser.parse(new StringReader(ruleContent));
+            
+            if (parser.hasErrors()) {
+                throw new RuleSyntaxException("Rule syntax errors: " + 
+                    parser.getErrors());
+            }
+        } catch (DroolsParserException e) {
+            throw new RuleSyntaxException("Rule parsing failed", e);
+        }
+    }
+}
+```
+
+### 2. Rule Testing Framework
+```java
+@Service
+public class RuleTestingService {
+    
+    private final KieSession testKieSession;
+    
+    public RuleTestResult testRule(String ruleContent, Object testFact) {
+        // Create isolated test session
+        KieServices kieServices = KieServices.Factory.get();
+        KieFileSystem kieFileSystem = kieServices.newKieFileSystem();
+        
+        // Add test rule
+        kieFileSystem.write("src/main/resources/test-rule.drl", ruleContent);
+        
+        KieBuilder kieBuilder = kieServices.newKieBuilder(kieFileSystem);
+        kieBuilder.buildAll();
+        
+        if (kieBuilder.getResults().hasMessages(Level.ERROR)) {
+            return RuleTestResult.builder()
+                .success(false)
+                .errorMessage("Compilation failed: " + kieBuilder.getResults().toString())
+                .build();
+        }
+        
+        KieContainer kieContainer = kieServices.newKieContainer(
+            kieBuilder.getKieModule().getReleaseId());
+        KieSession testSession = kieContainer.newKieSession();
+        
+        try {
+            // Insert test fact
+            testSession.insert(testFact);
+            
+            // Execute rules
+            int rulesExecuted = testSession.fireAllRules();
+            
+            return RuleTestResult.builder()
+                .success(true)
+                .rulesExecuted(rulesExecuted)
+                .resultFact(testFact)
+                .build();
+                
+        } finally {
+            testSession.dispose();
+        }
+    }
+    
+    public List<RuleTestResult> runRuleTestSuite(String ruleId) {
+        Rule rule = ruleRepository.findById(ruleId)
+            .orElseThrow(() -> new RuleNotFoundException("Rule not found"));
+            
+        List<RuleTestCase> testCases = ruleTestCaseRepository.findByRuleId(ruleId);
+        List<RuleTestResult> results = new ArrayList<>();
+        
+        for (RuleTestCase testCase : testCases) {
+            RuleTestResult result = testRule(rule.getContent(), testCase.getTestFact());
+            result.setTestCaseName(testCase.getName());
+            results.add(result);
+        }
+        
+        return results;
+    }
+}
+```
+
+## A/B Testing for Rules
+
+### 1. Rule Variant Testing
+```java
+@Service
+public class RuleABTestingService {
+    
+    private final RuleVariantRepository ruleVariantRepository;
+    private final RuleEngineService ruleEngineService;
+    private final ABTestMetricsCollector metricsCollector;
+    
+    public void createABTest(CreateABTestRequest request) {
+        ABTest abTest = ABTest.builder()
+            .name(request.getName())
+            .baseRuleId(request.getBaseRuleId())
+            .variantRuleId(request.getVariantRuleId())
+            .trafficSplitPercentage(request.getTrafficSplit()) // e.g., 50% each
+            .startDate(request.getStartDate())
+            .endDate(request.getEndDate())
+            .status(ABTestStatus.ACTIVE)
+            .build();
+            
+        abTestRepository.save(abTest);
+    }
+    
+    public RuleExecutionResult executeWithABTest(String customerId, Object fact, String ruleType) {
+        ABTest activeTest = getActiveABTest(ruleType);
+        
+        if (activeTest == null) {
+            // No A/B test, use default rule
+            return ruleEngineService.executeRules(fact, ruleType);
+        }
+        
+        // Determine which variant to use based on customer ID hash
+        boolean useVariant = shouldUseVariant(customerId, activeTest.getTrafficSplitPercentage());
+        
+        String ruleId = useVariant ? activeTest.getVariantRuleId() : activeTest.getBaseRuleId();
+        RuleExecutionResult result = executeSpecificRule(fact, ruleId);
+        
+        // Collect metrics for A/B test analysis
+        ABTestMetric metric = ABTestMetric.builder()
+            .abTestId(activeTest.getId())
+            .customerId(customerId)
+            .variant(useVariant ? "B" : "A")
+            .ruleId(ruleId)
+            .pointsEarned(extractPointsFromResult(result))
+            .executionTime(result.getExecutionTimeMs())
+            .timestamp(LocalDateTime.now())
+            .build();
+            
+        metricsCollector.collectMetric(metric);
+        
+        return result;
+    }
+    
+    private boolean shouldUseVariant(String customerId, int trafficSplitPercentage) {
+        // Use consistent hashing to assign customers to variants
+        int hash = Math.abs(customerId.hashCode() % 100);
+        return hash < trafficSplitPercentage;
+    }
+    
+    public ABTestReport generateABTestReport(String abTestId) {
+        List<ABTestMetric> metrics = abTestMetricsRepository.findByAbTestId(abTestId);
+        
+        // Calculate statistics for each variant
+        Map<String, List<ABTestMetric>> variantMetrics = metrics.stream()
+            .collect(Collectors.groupingBy(ABTestMetric::getVariant));
+            
+        ABTestVariantStats variantAStats = calculateVariantStats(variantMetrics.get("A"));
+        ABTestVariantStats variantBStats = calculateVariantStats(variantMetrics.get("B"));
+        
+        // Perform statistical significance test
+        double pValue = performTTest(variantAStats, variantBStats);
+        boolean isSignificant = pValue < 0.05;
+        
+        return ABTestReport.builder()
+            .abTestId(abTestId)
+            .variantAStats(variantAStats)
+            .variantBStats(variantBStats)
+            .pValue(pValue)
+            .isStatisticallySignificant(isSignificant)
+            .recommendation(generateRecommendation(variantAStats, variantBStats, isSignificant))
+            .build();
+    }
+}
+```
+
+## Rule Performance Monitoring
+
+### 1. Rule Execution Metrics
+```java
+@Component
+public class RuleExecutionAuditor {
+    
+    private final MeterRegistry meterRegistry;
+    private final RuleExecutionLogRepository logRepository;
+    
+    public void auditExecution(Object fact, RuleExecutionResult<?> result) {
+        // Record metrics
+        Timer.Sample sample = Timer.start(meterRegistry);
+        sample.stop(Timer.builder("rule.execution.time")
+            .tag("rule.type", extractRuleType(fact))
+            .tag("success", String.valueOf(result.isSuccess()))
+            .register(meterRegistry));
+            
+        Counter.builder("rule.execution.count")
+            .tag("rule.type", extractRuleType(fact))
+            .tag("rules.executed", String.valueOf(result.getRulesExecuted()))
+            .register(meterRegistry)
+            .increment();
+            
+        // Log execution details
+        RuleExecutionLog log = RuleExecutionLog.builder()
+            .factType(fact.getClass().getSimpleName())
+            .rulesExecuted(result.getRulesExecuted())
+            .executionTimeMs(result.getExecutionTimeMs())
+            .success(result.isSuccess())
+            .errorMessage(result.getErrorMessage())
+            .timestamp(LocalDateTime.now())
+            .build();
+            
+        logRepository.save(log);
+    }
+    
+    public RulePerformanceReport generatePerformanceReport(LocalDateTime startDate, LocalDateTime endDate) {
+        List<RuleExecutionLog> logs = logRepository.findByTimestampBetween(startDate, endDate);
+        
+        return RulePerformanceReport.builder()
+            .totalExecutions(logs.size())
+            .averageExecutionTime(calculateAverageExecutionTime(logs))
+            .successRate(calculateSuccessRate(logs))
+            .topSlowRules(findTopSlowRules(logs))
+            .errorSummary(generateErrorSummary(logs))
+            .build();
+    }
+}
+```
+
+### 2. Rule Health Monitoring
+```java
+@Component
+@Scheduled(fixedRate = 300000) // 5 minutes
+public class RuleHealthMonitor {
+    
+    private final RuleRepository ruleRepository;
+    private final AlertService alertService;
+    
+    public void monitorRuleHealth() {
+        List<Rule> activeRules = ruleRepository.findByStatus(RuleStatus.ACTIVE);
+        
+        for (Rule rule : activeRules) {
+            RuleHealthCheck healthCheck = performHealthCheck(rule);
+            
+            if (!healthCheck.isHealthy()) {
+                alertService.sendAlert(AlertType.RULE_HEALTH_ISSUE, 
+                    "Rule " + rule.getName() + " health check failed: " + 
+                    healthCheck.getIssues());
+            }
+        }
+    }
+    
+    private RuleHealthCheck performHealthCheck(Rule rule) {
+        List<String> issues = new ArrayList<>();
+        
+        // Check rule compilation
+        try {
+            ruleCompiler.compile(rule.getContent());
+        } catch (Exception e) {
+            issues.add("Compilation failed: " + e.getMessage());
+        }
+        
+        // Check rule performance
+        RulePerformanceMetrics metrics = getRecentPerformanceMetrics(rule.getId());
+        if (metrics.getAverageExecutionTime() > 1000) { // > 1 second
+            issues.add("High execution time: " + metrics.getAverageExecutionTime() + "ms");
+        }
+        
+        if (metrics.getErrorRate() > 0.05) { // > 5% error rate
+            issues.add("High error rate: " + (metrics.getErrorRate() * 100) + "%");
+        }
+        
+        return RuleHealthCheck.builder()
+            .ruleId(rule.getId())
+            .healthy(issues.isEmpty())
+            .issues(issues)
+            .checkTime(LocalDateTime.now())
+            .build();
+    }
+}
+```

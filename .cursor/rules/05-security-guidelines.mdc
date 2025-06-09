@@ -1,0 +1,757 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Security Guidelines
+
+## Authentication & Authorization
+
+### 1. JWT Token Implementation
+```java
+// JWT Configuration
+@Configuration
+public class JwtConfig {
+    
+    @Value("${jwt.secret}")
+    private String jwtSecret;
+    
+    @Value("${jwt.expiration:3600}") // 1 hour
+    private int jwtExpiration;
+    
+    @Value("${jwt.refresh.expiration:604800}") // 7 days
+    private int refreshTokenExpiration;
+    
+    public String generateToken(UserDetails userDetails) {
+        Map<String, Object> claims = new HashMap<>();
+        claims.put("roles", userDetails.getAuthorities().stream()
+            .map(GrantedAuthority::getAuthority)
+            .collect(Collectors.toList()));
+        claims.put("customerId", ((CustomUserDetails) userDetails).getCustomerId());
+        
+        return createToken(claims, userDetails.getUsername());
+    }
+    
+    private String createToken(Map<String, Object> claims, String subject) {
+        return Jwts.builder()
+            .setClaims(claims)
+            .setSubject(subject)
+            .setIssuedAt(new Date(System.currentTimeMillis()))
+            .setExpiration(new Date(System.currentTimeMillis() + jwtExpiration * 1000))
+            .signWith(SignatureAlgorithm.HS512, jwtSecret)
+            .compact();
+    }
+}
+```
+
+### 2. Multi-Factor Authentication (MFA)
+```java
+@Service
+public class MfaService {
+    
+    public MfaSecret generateMfaSecret(String userId) {
+        GoogleAuthenticator gAuth = new GoogleAuthenticator();
+        GoogleAuthenticatorKey key = gAuth.createCredentials();
+        
+        MfaSecret secret = MfaSecret.builder()
+            .userId(userId)
+            .secretKey(key.getKey())
+            .qrCodeUrl(GoogleAuthenticatorQRGenerator.getOtpAuthURL(
+                "Loyalty Platform", 
+                userId, 
+                key))
+            .build();
+            
+        return mfaSecretRepository.save(secret);
+    }
+    
+    public boolean validateMfaCode(String userId, int code) {
+        MfaSecret secret = mfaSecretRepository.findByUserId(userId);
+        if (secret == null) {
+            return false;
+        }
+        
+        GoogleAuthenticator gAuth = new GoogleAuthenticator();
+        return gAuth.authorize(secret.getSecretKey(), code);
+    }
+}
+```
+
+### 3. Role-Based Access Control (RBAC)
+```java
+// Security configuration
+@EnableGlobalMethodSecurity(prePostEnabled = true)
+@Configuration
+public class SecurityConfig {
+    
+    @Bean
+    public MethodSecurityExpressionHandler methodSecurityExpressionHandler() {
+        DefaultMethodSecurityExpressionHandler handler = new DefaultMethodSecurityExpressionHandler();
+        handler.setPermissionEvaluator(new CustomPermissionEvaluator());
+        return handler;
+    }
+}
+
+// Custom permission evaluator
+@Component
+public class CustomPermissionEvaluator implements PermissionEvaluator {
+    
+    @Override
+    public boolean hasPermission(Authentication authentication, Object targetDomainObject, Object permission) {
+        if (authentication == null || !(permission instanceof String)) {
+            return false;
+        }
+        
+        String permissionString = (String) permission;
+        return hasPrivilege(authentication, permissionString, targetDomainObject);
+    }
+    
+    private boolean hasPrivilege(Authentication auth, String permission, Object target) {
+        Collection<? extends GrantedAuthority> authorities = auth.getAuthorities();
+        
+        for (GrantedAuthority authority : authorities) {
+            if (authority.getAuthority().equals(permission)) {
+                return true;
+            }
+        }
+        
+        // Check for customer-specific permissions
+        if (target instanceof Customer) {
+            Customer customer = (Customer) target;
+            CustomUserDetails userDetails = (CustomUserDetails) auth.getPrincipal();
+            
+            // Customer can only access their own data
+            return customer.getCustomerId().equals(userDetails.getCustomerId());
+        }
+        
+        return false;
+    }
+}
+```
+
+## Data Protection
+
+### 1. Data Encryption at Rest
+```yaml
+# Database encryption configuration
+spring:
+  jpa:
+    properties:
+      hibernate:
+        encryptor:
+          registered_name: "AES"
+          algorithm: "AES/CBC/PKCS5Padding"
+          key_obtention_iterations: 1000
+          salt_generator_classname: "org.jasypt.salt.RandomSaltGenerator"
+          iv_generator_classname: "org.jasypt.iv.RandomIvGenerator"
+```
+
+```java
+// Entity field encryption
+@Entity
+public class Customer {
+    
+    @Id
+    private String customerId;
+    
+    @ColumnTransformer(
+        read = "AES_DECRYPT(email, UNHEX(SHA2('encryption_key', 512)))",
+        write = "AES_ENCRYPT(?, UNHEX(SHA2('encryption_key', 512)))"
+    )
+    private String email;
+    
+    @ColumnTransformer(
+        read = "AES_DECRYPT(phone, UNHEX(SHA2('encryption_key', 512)))",
+        write = "AES_ENCRYPT(?, UNHEX(SHA2('encryption_key', 512)))"
+    )
+    private String phone;
+    
+    @ColumnTransformer(
+        read = "AES_DECRYPT(ssn, UNHEX(SHA2('encryption_key', 512)))",
+        write = "AES_ENCRYPT(?, UNHEX(SHA2('encryption_key', 512)))"
+    )
+    private String ssn;
+}
+```
+
+### 2. Data Masking for Logs
+```java
+@Component
+public class DataMaskingProcessor {
+    
+    private static final Pattern EMAIL_PATTERN = Pattern.compile(
+        "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b"
+    );
+    
+    private static final Pattern PHONE_PATTERN = Pattern.compile(
+        "\\b\\+?[1-9]\\d{1,14}\\b"
+    );
+    
+    private static final Pattern CREDIT_CARD_PATTERN = Pattern.compile(
+        "\\b(?:\\d{4}[-\\s]?){3}\\d{4}\\b"
+    );
+    
+    public String maskSensitiveData(String content) {
+        if (content == null) {
+            return null;
+        }
+        
+        String masked = content;
+        
+        // Mask email addresses
+        masked = EMAIL_PATTERN.matcher(masked).replaceAll(m -> {
+            String email = m.group();
+            int atIndex = email.indexOf('@');
+            if (atIndex > 2) {
+                return email.substring(0, 2) + "***@" + email.substring(atIndex + 1);
+            }
+            return "***@" + email.substring(atIndex + 1);
+        });
+        
+        // Mask phone numbers
+        masked = PHONE_PATTERN.matcher(masked).replaceAll(m -> {
+            String phone = m.group();
+            if (phone.length() > 4) {
+                return phone.substring(0, phone.length() - 4) + "****";
+            }
+            return "****";
+        });
+        
+        // Mask credit card numbers
+        masked = CREDIT_CARD_PATTERN.matcher(masked).replaceAll("****-****-****-****");
+        
+        return masked;
+    }
+}
+```
+
+### 3. API Key Management
+```java
+@Service
+public class ApiKeyService {
+    
+    private final ApiKeyRepository apiKeyRepository;
+    private final RedisTemplate<String, String> redisTemplate;
+    
+    public ApiKey generateApiKey(String clientName, Set<String> permissions) {
+        String key = generateSecureKey();
+        String keyHash = hashApiKey(key);
+        
+        ApiKey apiKey = ApiKey.builder()
+            .keyHash(keyHash)
+            .clientName(clientName)
+            .permissions(permissions)
+            .isActive(true)
+            .createdAt(LocalDateTime.now())
+            .expiresAt(LocalDateTime.now().plusMonths(6))
+            .build();
+            
+        apiKeyRepository.save(apiKey);
+        
+        // Cache in Redis for fast lookup
+        cacheApiKey(keyHash, apiKey);
+        
+        return apiKey;
+    }
+    
+    private String generateSecureKey() {
+        SecureRandom random = new SecureRandom();
+        byte[] bytes = new byte[32];
+        random.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+    
+    private String hashApiKey(String apiKey) {
+        return DigestUtils.sha256Hex(apiKey);
+    }
+    
+    public boolean validateApiKey(String apiKey, String requiredPermission) {
+        String keyHash = hashApiKey(apiKey);
+        
+        // Check cache first
+        ApiKey cachedKey = getCachedApiKey(keyHash);
+        if (cachedKey != null) {
+            return isValidKey(cachedKey, requiredPermission);
+        }
+        
+        // Fallback to database
+        Optional<ApiKey> dbKey = apiKeyRepository.findByKeyHash(keyHash);
+        if (dbKey.isPresent()) {
+            cacheApiKey(keyHash, dbKey.get());
+            return isValidKey(dbKey.get(), requiredPermission);
+        }
+        
+        return false;
+    }
+    
+    private boolean isValidKey(ApiKey apiKey, String requiredPermission) {
+        return apiKey.isActive() && 
+               apiKey.getExpiresAt().isAfter(LocalDateTime.now()) &&
+               apiKey.getPermissions().contains(requiredPermission);
+    }
+}
+```
+
+## Input Validation & Sanitization
+
+### 1. Request Validation
+```java
+@RestController
+@Validated
+public class CustomerController {
+    
+    @PostMapping("/api/v1/customers")
+    public ResponseEntity<CustomerDTO> createCustomer(
+            @Valid @RequestBody CreateCustomerRequest request) {
+        
+        // Additional custom validation
+        validateCreateCustomerRequest(request);
+        
+        CustomerDTO customer = customerService.createCustomer(request);
+        return ResponseEntity.status(HttpStatus.CREATED).body(customer);
+    }
+    
+    private void validateCreateCustomerRequest(CreateCustomerRequest request) {
+        // Check for SQL injection patterns
+        if (containsSqlInjectionPattern(request.getFirstName()) ||
+            containsSqlInjectionPattern(request.getLastName())) {
+            throw new ValidationException("Invalid characters in name fields");
+        }
+        
+        // Validate email domain against allowed list
+        if (!isAllowedEmailDomain(request.getEmail())) {
+            throw new ValidationException("Email domain not allowed");
+        }
+    }
+    
+    private boolean containsSqlInjectionPattern(String input) {
+        String[] sqlKeywords = {"SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "UNION", "SCRIPT"};
+        String upperInput = input.toUpperCase();
+        
+        return Arrays.stream(sqlKeywords)
+            .anyMatch(keyword -> upperInput.contains(keyword));
+    }
+}
+
+// DTO validation annotations
+public class CreateCustomerRequest {
+    
+    @NotBlank(message = "First name is required")
+    @Size(min = 2, max = 50, message = "First name must be between 2 and 50 characters")
+    @Pattern(regexp = "^[a-zA-Z\\s]*$", message = "First name can only contain letters and spaces")
+    private String firstName;
+    
+    @NotBlank(message = "Last name is required")
+    @Size(min = 2, max = 50, message = "Last name must be between 2 and 50 characters")
+    @Pattern(regexp = "^[a-zA-Z\\s]*$", message = "Last name can only contain letters and spaces")
+    private String lastName;
+    
+    @NotBlank(message = "Email is required")
+    @Email(message = "Invalid email format")
+    @Size(max = 255, message = "Email cannot exceed 255 characters")
+    private String email;
+    
+    @Pattern(regexp = "^\\+?[1-9]\\d{1,14}$", message = "Invalid phone number format")
+    private String phone;
+    
+    @Past(message = "Date of birth must be in the past")
+    private LocalDate dateOfBirth;
+}
+```
+
+### 2. SQL Injection Prevention
+```java
+// Use parameterized queries
+@Repository
+public class CustomerRepositoryImpl {
+    
+    @PersistenceContext
+    private EntityManager entityManager;
+    
+    public List<Customer> findCustomersByStatus(String status) {
+        String jpql = "SELECT c FROM Customer c WHERE c.status = :status";
+        
+        return entityManager.createQuery(jpql, Customer.class)
+            .setParameter("status", status)
+            .getResultList();
+    }
+    
+    public List<Customer> searchCustomers(String searchTerm) {
+        // Use parameterized query to prevent SQL injection
+        String jpql = """
+            SELECT c FROM Customer c 
+            WHERE LOWER(c.firstName) LIKE LOWER(CONCAT('%', :searchTerm, '%'))
+            OR LOWER(c.lastName) LIKE LOWER(CONCAT('%', :searchTerm, '%'))
+            OR LOWER(c.email) LIKE LOWER(CONCAT('%', :searchTerm, '%'))
+            """;
+            
+        return entityManager.createQuery(jpql, Customer.class)
+            .setParameter("searchTerm", searchTerm)
+            .getResultList();
+    }
+}
+```
+
+## Security Headers & CORS
+
+### 1. Security Headers Configuration
+```java
+@Configuration
+public class SecurityHeadersConfig {
+    
+    @Bean
+    public FilterRegistrationBean<SecurityHeadersFilter> securityHeadersFilter() {
+        FilterRegistrationBean<SecurityHeadersFilter> registration = new FilterRegistrationBean<>();
+        registration.setFilter(new SecurityHeadersFilter());
+        registration.addUrlPatterns("/*");
+        registration.setOrder(1);
+        return registration;
+    }
+}
+
+@Component
+public class SecurityHeadersFilter implements Filter {
+    
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
+            throws IOException, ServletException {
+        
+        HttpServletResponse httpResponse = (HttpServletResponse) response;
+        
+        // Prevent clickjacking
+        httpResponse.setHeader("X-Frame-Options", "DENY");
+        
+        // Prevent MIME type sniffing
+        httpResponse.setHeader("X-Content-Type-Options", "nosniff");
+        
+        // XSS protection
+        httpResponse.setHeader("X-XSS-Protection", "1; mode=block");
+        
+        // HSTS (HTTP Strict Transport Security)
+        httpResponse.setHeader("Strict-Transport-Security", 
+            "max-age=31536000; includeSubDomains; preload");
+        
+        // Content Security Policy
+        httpResponse.setHeader("Content-Security-Policy", 
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'");
+        
+        // Referrer Policy
+        httpResponse.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+        
+        // Feature Policy
+        httpResponse.setHeader("Permissions-Policy", 
+            "geolocation=(), microphone=(), camera=()");
+        
+        chain.doFilter(request, response);
+    }
+}
+```
+
+### 2. CORS Configuration
+```java
+@Configuration
+@EnableWebSecurity
+public class CorsConfig {
+    
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+        
+        // Allow specific origins (not wildcard in production)
+        configuration.setAllowedOriginPatterns(Arrays.asList(
+            "https://loyalty-app.example.com",
+            "https://admin-dashboard.example.com",
+            "http://localhost:3000" // Development only
+        ));
+        
+        configuration.setAllowedMethods(Arrays.asList(
+            "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"
+        ));
+        
+        configuration.setAllowedHeaders(Arrays.asList(
+            "Authorization", "Content-Type", "X-Requested-With", 
+            "Accept", "X-API-Version", "X-Request-ID"
+        ));
+        
+        configuration.setExposedHeaders(Arrays.asList(
+            "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"
+        ));
+        
+        configuration.setAllowCredentials(true);
+        configuration.setMaxAge(3600L);
+        
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/api/**", configuration);
+        
+        return source;
+    }
+}
+```
+
+## Rate Limiting & DDoS Protection
+
+### 1. Rate Limiting Implementation
+```java
+@Component
+public class RateLimitingFilter implements Filter {
+    
+    private final RedisTemplate<String, String> redisTemplate;
+    private final RateLimitConfig rateLimitConfig;
+    
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
+            throws IOException, ServletException {
+        
+        HttpServletRequest httpRequest = (HttpServletRequest) request;
+        HttpServletResponse httpResponse = (HttpServletResponse) response;
+        
+        String clientIp = getClientIpAddress(httpRequest);
+        String endpoint = httpRequest.getRequestURI();
+        String rateLimitKey = "rate_limit:" + clientIp + ":" + endpoint;
+        
+        RateLimitRule rule = rateLimitConfig.getRuleForEndpoint(endpoint);
+        
+        if (isRateLimited(rateLimitKey, rule)) {
+            httpResponse.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
+            httpResponse.setHeader("X-RateLimit-Limit", String.valueOf(rule.getLimit()));
+            httpResponse.setHeader("X-RateLimit-Remaining", "0");
+            httpResponse.setHeader("X-RateLimit-Reset", String.valueOf(getResetTime(rule)));
+            
+            httpResponse.getWriter().write("{\"error\":\"Rate limit exceeded\"}");
+            return;
+        }
+        
+        incrementRequestCount(rateLimitKey, rule);
+        setRateLimitHeaders(httpResponse, rateLimitKey, rule);
+        
+        chain.doFilter(request, response);
+    }
+    
+    private boolean isRateLimited(String key, RateLimitRule rule) {
+        String currentCount = redisTemplate.opsForValue().get(key);
+        return currentCount != null && Integer.parseInt(currentCount) >= rule.getLimit();
+    }
+    
+    private void incrementRequestCount(String key, RateLimitRule rule) {
+        String currentCount = redisTemplate.opsForValue().get(key);
+        
+        if (currentCount == null) {
+            redisTemplate.opsForValue().set(key, "1", rule.getWindowDuration());
+        } else {
+            redisTemplate.opsForValue().increment(key);
+        }
+    }
+}
+```
+
+### 2. API Security Best Practices
+```java
+@RestController
+@RequestMapping("/api/v1/customers")
+public class CustomerController {
+    
+    // Use HTTPS only
+    @PreAuthorize("hasRole('CUSTOMER') or hasRole('ADMIN')")
+    @GetMapping("/{customerId}")
+    public ResponseEntity<CustomerDTO> getCustomer(
+            @PathVariable @Valid @Pattern(regexp = UUID_PATTERN) String customerId,
+            Authentication authentication) {
+        
+        // Verify customer can only access their own data
+        if (!canAccessCustomer(authentication, customerId)) {
+            throw new AccessDeniedException("Access denied");
+        }
+        
+        CustomerDTO customer = customerService.getCustomer(customerId);
+        return ResponseEntity.ok(customer);
+    }
+    
+    private boolean canAccessCustomer(Authentication auth, String customerId) {
+        if (auth.getAuthorities().stream()
+                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"))) {
+            return true; // Admin can access any customer
+        }
+        
+        CustomUserDetails userDetails = (CustomUserDetails) auth.getPrincipal();
+        return customerId.equals(userDetails.getCustomerId());
+    }
+}
+```
+
+## Audit Logging
+
+### 1. Security Audit Configuration
+```java
+@Configuration
+@EnableJpaAuditing
+public class AuditConfig {
+    
+    @Bean
+    public AuditorAware<String> auditorProvider() {
+        return new SecurityAuditorAware();
+    }
+}
+
+@Component
+public class SecurityAuditorAware implements AuditorAware<String> {
+    
+    @Override
+    public Optional<String> getCurrentAuditor() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        
+        if (authentication == null || !authentication.isAuthenticated() ||
+            authentication instanceof AnonymousAuthenticationToken) {
+            return Optional.of("SYSTEM");
+        }
+        
+        return Optional.of(authentication.getName());
+    }
+}
+
+// Audit log entity
+@Entity
+@Table(name = "security_audit_log")
+public class SecurityAuditLog {
+    
+    @Id
+    @GeneratedValue
+    private Long id;
+    
+    private String userId;
+    private String action;
+    private String resource;
+    private String ipAddress;
+    private String userAgent;
+    private LocalDateTime timestamp;
+    private String status; // SUCCESS, FAILURE
+    private String details;
+    
+    // Constructors, getters, setters
+}
+
+// Audit logging aspect
+@Aspect
+@Component
+@Slf4j
+public class SecurityAuditAspect {
+    
+    private final SecurityAuditLogRepository auditLogRepository;
+    
+    @AfterReturning(pointcut = "@annotation(auditable)", returning = "result")
+    public void logSuccessfulOperation(JoinPoint joinPoint, Auditable auditable, Object result) {
+        logSecurityEvent(joinPoint, auditable, "SUCCESS", null);
+    }
+    
+    @AfterThrowing(pointcut = "@annotation(auditable)", throwing = "exception")
+    public void logFailedOperation(JoinPoint joinPoint, Auditable auditable, Exception exception) {
+        logSecurityEvent(joinPoint, auditable, "FAILURE", exception.getMessage());
+    }
+    
+    private void logSecurityEvent(JoinPoint joinPoint, Auditable auditable, String status, String error) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        HttpServletRequest request = getCurrentHttpRequest();
+        
+        SecurityAuditLog auditLog = SecurityAuditLog.builder()
+            .userId(auth != null ? auth.getName() : "ANONYMOUS")
+            .action(auditable.action())
+            .resource(auditable.resource())
+            .ipAddress(getClientIpAddress(request))
+            .userAgent(request.getHeader("User-Agent"))
+            .timestamp(LocalDateTime.now())
+            .status(status)
+            .details(error)
+            .build();
+            
+        auditLogRepository.save(auditLog);
+    }
+}
+
+// Auditable annotation
+@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Auditable {
+    String action();
+    String resource();
+}
+```
+
+## Compliance & Privacy
+
+### 1. GDPR Compliance
+```java
+@Service
+public class GdprComplianceService {
+    
+    public void exportCustomerData(String customerId) {
+        // Export all customer data in portable format
+        CustomerDataExport export = CustomerDataExport.builder()
+            .personalData(getPersonalData(customerId))
+            .transactionHistory(getTransactionHistory(customerId))
+            .pointsHistory(getPointsHistory(customerId))
+            .campaignHistory(getCampaignHistory(customerId))
+            .build();
+            
+        // Generate JSON/CSV export
+        generateDataExport(export, customerId);
+    }
+    
+    public void deleteCustomerData(String customerId, DataDeletionRequest request) {
+        // Implement right to be forgotten
+        if (request.isHardDelete()) {
+            // Complete data removal
+            customerService.hardDeleteCustomer(customerId);
+        } else {
+            // Anonymization
+            customerService.anonymizeCustomer(customerId);
+        }
+        
+        // Log deletion for audit purposes
+        auditService.logDataDeletion(customerId, request);
+    }
+    
+    public ConsentRecord recordConsent(String customerId, ConsentType consentType, boolean granted) {
+        ConsentRecord consent = ConsentRecord.builder()
+            .customerId(customerId)
+            .consentType(consentType)
+            .granted(granted)
+            .timestamp(LocalDateTime.now())
+            .ipAddress(getCurrentIpAddress())
+            .userAgent(getCurrentUserAgent())
+            .build();
+            
+        return consentRepository.save(consent);
+    }
+}
+```
+
+### 2. PCI DSS Compliance (for payment data)
+```java
+@Component
+public class PciComplianceUtil {
+    
+    // Never store full credit card numbers
+    public String maskCreditCardNumber(String cardNumber) {
+        if (cardNumber == null || cardNumber.length() < 4) {
+            return "****";
+        }
+        
+        String lastFour = cardNumber.substring(cardNumber.length() - 4);
+        return "****-****-****-" + lastFour;
+    }
+    
+    // Use tokenization for sensitive payment data
+    public PaymentToken tokenizePaymentMethod(PaymentMethod paymentMethod) {
+        // Use external tokenization service (Stripe, etc.)
+        return paymentTokenizationService.tokenize(paymentMethod);
+    }
+    
+    // Validate PCI compliance requirements
+    public boolean validatePciCompliance() {
+        // Check encryption requirements
+        // Validate network security
+        // Verify access controls
+        // Confirm logging and monitoring
+        return true;
+    }
+}
+```

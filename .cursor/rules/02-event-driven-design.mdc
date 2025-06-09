@@ -1,0 +1,305 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Event-Driven Design Rules
+
+## Event Design Principles
+
+### 1. Event Schema Standards
+All events must follow a consistent schema for traceability and processing:
+
+```json
+{
+  "eventId": "uuid",
+  "eventType": "string", 
+  "aggregateId": "string",
+  "aggregateType": "string",
+  "version": "integer",
+  "timestamp": "datetime",
+  "correlationId": "uuid",
+  "causationId": "uuid", 
+  "data": "object",
+  "metadata": {
+    "source": "service-name",
+    "userId": "string",
+    "traceId": "string"
+  }
+}
+```
+
+### 2. Event Types Classification
+
+#### Domain Events (Business Events)
+Events that represent business-significant occurrences:
+- `CustomerRegistered`
+- `PointsEarned`
+- `PointsSpent`
+- `RewardPurchased`
+- `LevelUpgraded`
+- `CampaignActivated`
+
+#### Integration Events
+Events for system integration and external communication:
+- `ExternalTransactionReceived`
+- `EmailNotificationSent`
+- `PaymentProcessed`
+- `SystemHealthCheck`
+
+#### System Events
+Internal technical events:
+- `ServiceStarted`
+- `ConfigurationChanged`
+- `MaintenanceScheduled`
+
+## Kafka Topic Structure
+
+### Topic Naming Convention
+Format: `{domain}.{entity}.{action}.{version}`
+
+Examples:
+- `loyalty.customer.registered.v1`
+- `loyalty.points.earned.v1`
+- `loyalty.reward.purchased.v1`
+- `loyalty.level.upgraded.v1`
+
+### Topic Configuration
+```yaml
+Partitions: 6 # For parallelism
+Replication Factor: 3 # For fault tolerance
+Retention: 168h # 7 days
+Cleanup Policy: delete
+Compression: snappy
+```
+
+## Event Sourcing Implementation
+
+### Aggregate Events
+Each business aggregate should publish events representing state changes:
+
+```java
+// Example: Customer Aggregate Events
+public abstract class CustomerEvent extends DomainEvent {
+    private String customerId;
+    // ... common fields
+}
+
+public class CustomerRegisteredEvent extends CustomerEvent {
+    private String email;
+    private String firstName;
+    private String lastName;
+    private LocalDateTime registrationDate;
+    // ... event data
+}
+
+public class CustomerProfileUpdatedEvent extends CustomerEvent {
+    private Map<String, Object> updatedFields;
+    private LocalDateTime updateDate;
+    // ... event data
+}
+```
+
+### Event Store
+- Store all events in append-only format
+- Use PostgreSQL for event store with proper indexing
+- Implement event replay capability for recovery
+- Support event versioning and migration
+
+## Saga Pattern Implementation
+
+### 1. Orchestration Saga
+For complex business processes that require coordination:
+
+```java
+@Component
+public class RewardPurchaseSaga {
+    
+    @SagaOrchestrationStart
+    public void handle(RewardPurchaseRequestedEvent event) {
+        // Step 1: Validate customer eligibility
+        commandGateway.send(new ValidateCustomerEligibilityCommand(
+            event.getCustomerId(), event.getCampaignId()));
+    }
+    
+    @SagaOrchestrationHandler
+    public void handle(CustomerEligibilityValidatedEvent event) {
+        // Step 2: Reserve points
+        commandGateway.send(new ReservePointsCommand(
+            event.getCustomerId(), event.getPointsRequired()));
+    }
+    
+    @SagaOrchestrationHandler  
+    public void handle(PointsReservedEvent event) {
+        // Step 3: Generate coupon
+        commandGateway.send(new GenerateCouponCommand(
+            event.getCampaignId(), event.getCustomerId()));
+    }
+    
+    // ... handle success and compensation
+}
+```
+
+### 2. Choreography Saga
+For simpler distributed transactions:
+
+```java
+// Service A publishes event
+eventPublisher.publish(new PointsEarnedEvent(customerId, points));
+
+// Service B reacts to event
+@EventHandler
+public void handle(PointsEarnedEvent event) {
+    // Update customer level based on points
+    levelService.recalculateLevel(event.getCustomerId());
+}
+
+// Service C reacts to event
+@EventHandler
+public void handle(PointsEarnedEvent event) {
+    // Send notification
+    notificationService.sendPointsEarnedNotification(event);
+}
+```
+
+## Event Processing Patterns
+
+### 1. Event Handlers
+Each service implements event handlers for relevant events:
+
+```java
+@Component
+public class CustomerEventHandler {
+    
+    @KafkaListener(topics = "loyalty.customer.registered.v1")
+    public void handleCustomerRegistered(CustomerRegisteredEvent event) {
+        // Process customer registration
+        // Create account, send welcome email, etc.
+    }
+    
+    @KafkaListener(topics = "loyalty.points.earned.v1") 
+    public void handlePointsEarned(PointsEarnedEvent event) {
+        // Update customer segment
+        // Check for level upgrades
+        // Send notifications
+    }
+}
+```
+
+### 2. Event Projections
+Create read models from events for optimal query performance:
+
+```java
+@Component
+public class CustomerProjectionHandler {
+    
+    @EventHandler
+    public void on(CustomerRegisteredEvent event) {
+        CustomerView view = new CustomerView();
+        view.setCustomerId(event.getCustomerId());
+        view.setEmail(event.getEmail());
+        view.setRegistrationDate(event.getRegistrationDate());
+        customerViewRepository.save(view);
+    }
+    
+    @EventHandler
+    public void on(CustomerProfileUpdatedEvent event) {
+        CustomerView view = customerViewRepository.findById(event.getCustomerId());
+        view.applyUpdates(event.getUpdatedFields());
+        customerViewRepository.save(view);
+    }
+}
+```
+
+## Event Error Handling
+
+### 1. Retry Mechanisms
+```yaml
+Retry Configuration:
+  Initial Delay: 1s
+  Max Delay: 30s
+  Multiplier: 2.0
+  Max Attempts: 5
+  Backoff Type: exponential
+```
+
+### 2. Dead Letter Queue
+- Failed events after max retries go to DLQ
+- Monitor DLQ for analysis and manual intervention
+- Implement replay mechanism from DLQ
+
+### 3. Poison Message Handling
+- Detect and quarantine poison messages
+- Log detailed error information
+- Alert operations team for investigation
+
+## Event Monitoring and Observability
+
+### 1. Event Metrics
+Track key metrics for event processing:
+- Event publish rate
+- Event consumption lag
+- Processing latency
+- Error rates
+- Dead letter queue size
+
+### 2. Event Tracing
+- Correlation IDs for request tracing
+- Event lineage tracking
+- Performance monitoring
+- Business process monitoring
+
+### 3. Event Auditing
+- Log all published events
+- Track event consumers and processing status
+- Maintain audit trail for compliance
+- Support event replay for debugging
+
+## Event Versioning Strategy
+
+### 1. Schema Evolution
+Support backward compatible schema changes:
+- Add optional fields
+- Use default values for new fields
+- Maintain field type compatibility
+- Version events when breaking changes needed
+
+### 2. Event Migration
+Process for handling event version upgrades:
+```java
+@Component
+public class EventVersionMigrator {
+    
+    public CustomerRegisteredEventV2 migrate(CustomerRegisteredEventV1 oldEvent) {
+        return CustomerRegisteredEventV2.builder()
+            .customerId(oldEvent.getCustomerId())
+            .email(oldEvent.getEmail())
+            .firstName(oldEvent.getFirstName())
+            .lastName(oldEvent.getLastName())
+            .registrationDate(oldEvent.getRegistrationDate())
+            .source("MIGRATION") // New field with default
+            .build();
+    }
+}
+```
+
+## Event Security
+
+### 1. Event Encryption
+- Encrypt sensitive data in event payload
+- Use field-level encryption for PII
+- Implement key rotation policy
+- Secure key management
+
+### 2. Event Authorization
+- Validate event publisher authorization
+- Implement event consumer permissions
+- Audit event access patterns
+- Monitor for unauthorized access
+
+### 3. Event Integrity
+- Digital signatures for critical events
+- Checksum validation
+- Tamper detection
+- Event authenticity verification
+

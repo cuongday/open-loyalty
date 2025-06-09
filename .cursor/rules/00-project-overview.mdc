@@ -1,0 +1,61 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Loyalty Platform Project Overview
+
+## Project Description
+This is a modern loyalty platform built with Spring Boot microservices architecture and event-driven design. The system provides comprehensive customer loyalty management including points earning, rewards redemption, customer segmentation, and analytics.
+
+## Key Technologies
+- **Backend**: Spring Boot 3.5.0, Java 21
+- **Microservices**: Spring Cloud ecosystem
+- **Database**: PostgreSQL, MongoDB, Redis, Elasticsearch
+- **Messaging**: Apache Kafka, RabbitMQ
+- **Monitoring**: Prometheus, Grafana, ELK Stack
+- **Container**: Docker, Kubernetes
+
+## Architecture Principles
+- Domain-Driven Design (DDD)
+- Event-Driven Architecture
+- CQRS Pattern
+- Saga Pattern for distributed transactions
+- API-First Design
+
+## Project Structure
+```
+loyalty-platform/
+├── services/                    # Microservices
+│   ├── user-service/           # Authentication & User Management
+│   ├── customer-service/       # Customer Profile Management
+│   ├── account-service/        # Points & Balance Management
+│   ├── earning-rules-service/  # Rule Engine
+│   ├── campaign-service/       # Rewards & Campaigns
+│   ├── transaction-service/    # Purchase Processing
+│   ├── level-service/          # Customer Tiers
+│   ├── segment-service/        # Customer Segmentation
+│   ├── notification-service/   # Multi-channel Notifications
+│   └── analytics-service/      # Reporting & BI
+├── shared/                     # Shared libraries
+│   ├── common/                 # Common utilities
+│   ├── events/                 # Event definitions
+│   └── security/              # Security configurations
+├── infrastructure/             # Infrastructure as Code
+│   ├── docker/                 # Docker configurations
+│   ├── kubernetes/             # K8s manifests
+│   └── terraform/              # Infrastructure provisioning
+├── gateway/                    # API Gateway
+└── config/                     # Configuration service
+```
+
+## Business Domains
+1. **User Management**: Authentication, authorization, user profiles
+2. **Customer Management**: Customer lifecycle, preferences, status
+3. **Points Management**: Earning, spending, expiration, transactions
+4. **Rewards Management**: Campaigns, coupons, redemption
+5. **Transaction Processing**: Purchase validation, integration
+6. **Analytics**: Reporting, insights, business intelligence
+7. **Notifications**: Email, SMS, push notifications
+8. **Segmentation**: Customer categorization, targeting
+

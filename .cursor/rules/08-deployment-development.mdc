@@ -1,0 +1,878 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Deployment & Development Guidelines
+
+## Development Environment Setup
+
+### 1. Local Development Configuration
+```yaml
+# docker-compose.dev.yml
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: loyalty_dev
+      POSTGRES_USER: loyalty
+      POSTGRES_PASSWORD: loyalty123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass redis123
+
+  mongodb:
+    image: mongo:6
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: loyalty
+      MONGO_INITDB_ROOT_PASSWORD: loyalty123
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+
+volumes:
+  postgres_data:
+  mongo_data:
+  elasticsearch_data:
+```
+
+### 2. Development Profile Configuration
+```yaml
+# application-dev.yml
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/loyalty_dev
+    username: loyalty
+    password: loyalty123
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 2
+
+  redis:
+    host: localhost
+    port: 6379
+    password: redis123
+    timeout: 2000ms
+
+  data:
+    mongodb:
+      uri: mongodb://loyalty:loyalty123@localhost:27017/loyalty_analytics
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: loyalty-dev
+    producer:
+      acks: 1
+
+logging:
+  level:
+    com.loyalty: DEBUG
+    org.springframework.security: DEBUG
+    org.springframework.data: DEBUG
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+```
+
+### 3. Development Tools & IDE Setup
+```xml
+<!-- Maven dev profile -->
+<profile>
+    <id>dev</id>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-devtools</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.flywaydb</groupId>
+                <artifactId>flyway-maven-plugin</artifactId>
+                <configuration>
+                    <url>jdbc:postgresql://localhost:5432/loyalty_dev</url>
+                    <user>loyalty</user>
+                    <password>loyalty123</password>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</profile>
+```
+
+## CI/CD Pipeline
+
+### 1. GitHub Actions Workflow
+```yaml
+# .github/workflows/ci-cd.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  JAVA_VERSION: 17
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: loyalty-platform
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up JDK
+      uses: actions/setup-java@v3
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        
+    - name: Cache Maven dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        
+    - name: Run tests
+      run: |
+        mvn clean test -B
+        mvn jacoco:report
+        
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      
+    - name: Run security scan
+      uses: securecodewarrior/github-action-add-sarif@v1
+      with:
+        sarif-file: 'security-scan-results.sarif'
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up JDK
+      uses: actions/setup-java@v3
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        
+    - name: Build with Maven
+      run: mvn clean package -DskipTests -B
+      
+    - name: Build Docker images
+      run: |
+        for service in user-service customer-service account-service campaign-service; do
+          docker build -t ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}/$service:${{ github.sha }} ./services/$service
+          docker tag ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}/$service:${{ github.sha }} ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}/$service:latest
+        done
+        
+    - name: Log in to Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.DOCKER_REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Push Docker images
+      run: |
+        for service in user-service customer-service account-service campaign-service; do
+          docker push ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}/$service:${{ github.sha }}
+          docker push ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}/$service:latest
+        done
+
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+    - name: Deploy to staging
+      run: |
+        # Deployment to staging environment
+        kubectl apply -f k8s/staging/ --context=staging-cluster
+        kubectl set image deployment/user-service user-service=${{ env.DOCKER_REGISTRY }}/${{ github.repository }}/user-service:${{ github.sha }} --context=staging-cluster
+
+  deploy-production:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Deploy to production
+      run: |
+        # Blue-green deployment to production
+        kubectl apply -f k8s/production/ --context=production-cluster
+        kubectl set image deployment/user-service user-service=${{ env.DOCKER_REGISTRY }}/${{ github.repository }}/user-service:${{ github.sha }} --context=production-cluster
+```
+
+### 2. Dockerfile Standards
+```dockerfile
+# Multi-stage Dockerfile for microservices
+FROM maven:3.9-openjdk-17 AS build
+WORKDIR /app
+
+# Copy pom files first for better layer caching
+COPY pom.xml .
+COPY src ./src
+
+# Build the application
+RUN mvn clean package -DskipTests
+
+# Runtime stage
+FROM openjdk:17-jre-slim
+
+# Create non-root user
+RUN groupadd -r loyalty && useradd -r -g loyalty loyalty
+
+# Install necessary packages
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy JAR from build stage
+COPY --from=build /app/target/*.jar app.jar
+
+# Change ownership to non-root user
+RUN chown -R loyalty:loyalty /app
+USER loyalty
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8080/actuator/health || exit 1
+
+# Expose port
+EXPOSE 8080
+
+# JVM options for containerized environment
+ENV JAVA_OPTS="-XX:+UnlockExperimentalVMOptions \
+               -XX:+UseContainerSupport \
+               -XX:MaxRAMPercentage=75.0 \
+               -XX:+UseG1GC \
+               -XX:+UseStringDeduplication"
+
+# Run the application
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
+```
+
+## Kubernetes Deployment
+
+### 1. Service Deployment Manifests
+```yaml
+# k8s/base/user-service.yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  labels:
+    app: user-service
+    tier: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: user-service
+  template:
+    metadata:
+      labels:
+        app: user-service
+        tier: backend
+    spec:
+      containers:
+      - name: user-service
+        image: ghcr.io/loyalty-platform/user-service:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "kubernetes"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-secrets
+              key: url
+        - name: DATABASE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: database-secrets
+              key: username
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-secrets
+              key: password
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8080
+          initialDelaySeconds: 90
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+      volumes:
+      - name: config-volume
+        configMap:
+          name: user-service-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  labels:
+    app: user-service
+spec:
+  selector:
+    app: user-service
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: user-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: user-service
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+```
+
+### 2. Helm Chart Structure
+```yaml
+# helm/loyalty-platform/Chart.yaml
+apiVersion: v2
+name: loyalty-platform
+description: A Helm chart for Loyalty Platform
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+dependencies:
+- name: postgresql
+  version: 12.x.x
+  repository: https://charts.bitnami.com/bitnami
+- name: redis
+  version: 17.x.x
+  repository: https://charts.bitnami.com/bitnami
+- name: mongodb
+  version: 13.x.x
+  repository: https://charts.bitnami.com/bitnami
+```
+
+```yaml
+# helm/loyalty-platform/values.yaml
+global:
+  imageRegistry: ghcr.io
+  imagePullSecrets:
+    - name: ghcr-secret
+
+services:
+  userService:
+    image:
+      repository: loyalty-platform/user-service
+      tag: latest
+      pullPolicy: IfNotPresent
+    replicas: 3
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 250m
+      limits:
+        memory: 1Gi
+        cpu: 500m
+    autoscaling:
+      enabled: true
+      minReplicas: 3
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 70
+
+  customerService:
+    image:
+      repository: loyalty-platform/customer-service
+      tag: latest
+    replicas: 3
+    # ... similar configuration
+
+# Database configurations
+postgresql:
+  enabled: true
+  auth:
+    username: loyalty
+    database: loyalty_db
+  primary:
+    persistence:
+      enabled: true
+      size: 100Gi
+
+redis:
+  enabled: true
+  auth:
+    enabled: true
+  master:
+    persistence:
+      enabled: true
+      size: 20Gi
+
+mongodb:
+  enabled: true
+  auth:
+    enabled: true
+    rootUser: loyalty
+    databases:
+      - loyalty_analytics
+  persistence:
+    enabled: true
+    size: 50Gi
+
+# Monitoring
+prometheus:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+
+grafana:
+  enabled: true
+  dashboards:
+    enabled: true
+```
+
+### 3. Environment-Specific Overlays (Kustomize)
+```yaml
+# k8s/overlays/production/kustomization.yml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: loyalty-production
+
+resources:
+- ../../base
+
+patchesStrategicMerge:
+- deployment-patches.yml
+- service-patches.yml
+
+configMapGenerator:
+- name: app-config
+  files:
+  - application-production.yml
+
+secretGenerator:
+- name: database-secrets
+  env: database.env
+
+images:
+- name: ghcr.io/loyalty-platform/user-service
+  newTag: v1.2.3
+```
+
+## Database Migration Strategy
+
+### 1. Flyway Migration Scripts
+```sql
+-- V1.0.0__Create_users_table.sql
+CREATE TABLE users (
+    user_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_status ON users(status);
+
+-- V1.0.1__Add_user_roles_table.sql
+CREATE TABLE user_roles (
+    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    role VARCHAR(50) NOT NULL,
+    granted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (user_id, role)
+);
+
+-- V1.1.0__Add_customer_preferences.sql
+ALTER TABLE customers ADD COLUMN preferences JSONB;
+CREATE INDEX idx_customers_preferences ON customers USING GIN (preferences);
+```
+
+### 2. Migration Best Practices
+```java
+@Component
+public class DatabaseMigrationValidator {
+    
+    private final DataSource dataSource;
+    private final Flyway flyway;
+    
+    @EventListener(ApplicationReadyEvent.class)
+    public void validateMigrations() {
+        MigrationInfo[] migrations = flyway.info().all();
+        
+        for (MigrationInfo migration : migrations) {
+            if (migration.getState() == MigrationState.FAILED) {
+                throw new IllegalStateException(
+                    "Failed migration detected: " + migration.getVersion() + 
+                    " - " + migration.getDescription());
+            }
+        }
+        
+        log.info("All database migrations completed successfully");
+    }
+    
+    @PreDestroy
+    public void validateDataIntegrity() {
+        // Run data integrity checks before shutdown
+        validateReferentialIntegrity();
+        validateBusinessRules();
+    }
+    
+    private void validateReferentialIntegrity() {
+        // Check for orphaned records
+        String orphanedCustomersQuery = """
+            SELECT COUNT(*) FROM customers c 
+            WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.user_id = c.user_id)
+            """;
+            
+        // Execute validation queries
+    }
+}
+```
+
+## Environment Configuration Management
+
+### 1. Configuration Management
+```yaml
+# config/application-production.yml
+spring:
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      validation-timeout: 5000
+
+  redis:
+    sentinel:
+      master: ${REDIS_MASTER_NAME}
+      nodes: ${REDIS_SENTINEL_NODES}
+    password: ${REDIS_PASSWORD}
+    timeout: 3000ms
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS}
+    security:
+      protocol: SASL_SSL
+    sasl:
+      mechanism: PLAIN
+      jaas:
+        config: ${KAFKA_SASL_CONFIG}
+
+logging:
+  level:
+    com.loyalty: INFO
+    org.springframework.security: WARN
+  appender:
+    console:
+      enabled: false
+    json:
+      enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# Feature flags
+features:
+  new-point-calculation: ${FEATURE_NEW_POINT_CALCULATION:false}
+  enhanced-segmentation: ${FEATURE_ENHANCED_SEGMENTATION:false}
+  loyalty-tiers-v2: ${FEATURE_LOYALTY_TIERS_V2:false}
+```
+
+### 2. Secrets Management
+```yaml
+# External Secrets Operator configuration
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: vault-backend
+spec:
+  provider:
+    vault:
+      server: "https://vault.company.com"
+      path: "secret"
+      version: "v2"
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "loyalty-platform"
+
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: database-credentials
+spec:
+  refreshInterval: 15s
+  secretStoreRef:
+    name: vault-backend
+    kind: SecretStore
+  target:
+    name: database-secrets
+    creationPolicy: Owner
+  data:
+  - secretKey: username
+    remoteRef:
+      key: loyalty-platform/database
+      property: username
+  - secretKey: password
+    remoteRef:
+      key: loyalty-platform/database
+      property: password
+```
+
+## Blue-Green Deployment Strategy
+
+### 1. Blue-Green Deployment Script
+```bash
+#!/bin/bash
+# blue-green-deploy.sh
+
+set -e
+
+NAMESPACE="loyalty-production"
+SERVICE_NAME="user-service"
+NEW_VERSION=$1
+CURRENT_COLOR=$(kubectl get service $SERVICE_NAME -n $NAMESPACE -o jsonpath='{.spec.selector.color}')
+
+if [ "$CURRENT_COLOR" = "blue" ]; then
+    NEW_COLOR="green"
+else
+    NEW_COLOR="blue"
+fi
+
+echo "Current color: $CURRENT_COLOR"
+echo "Deploying to: $NEW_COLOR"
+
+# Deploy new version
+kubectl set image deployment/$SERVICE_NAME-$NEW_COLOR \
+    $SERVICE_NAME=ghcr.io/loyalty-platform/$SERVICE_NAME:$NEW_VERSION \
+    -n $NAMESPACE
+
+# Wait for rollout to complete
+kubectl rollout status deployment/$SERVICE_NAME-$NEW_COLOR -n $NAMESPACE
+
+# Run smoke tests
+echo "Running smoke tests..."
+kubectl run smoke-test-$NEW_COLOR \
+    --image=loyalty-platform/smoke-tests:latest \
+    --env="TARGET_URL=http://$SERVICE_NAME-$NEW_COLOR" \
+    --restart=Never \
+    -n $NAMESPACE
+
+# Wait for smoke tests to complete
+kubectl wait --for=condition=complete job/smoke-test-$NEW_COLOR -n $NAMESPACE --timeout=300s
+
+# Check smoke test results
+if kubectl logs job/smoke-test-$NEW_COLOR -n $NAMESPACE | grep -q "TESTS PASSED"; then
+    echo "Smoke tests passed. Switching traffic to $NEW_COLOR"
+    
+    # Switch traffic
+    kubectl patch service $SERVICE_NAME -n $NAMESPACE \
+        -p '{"spec":{"selector":{"color":"'$NEW_COLOR'"}}}'
+    
+    echo "Traffic switched to $NEW_COLOR successfully"
+    
+    # Scale down old version
+    kubectl scale deployment $SERVICE_NAME-$CURRENT_COLOR --replicas=0 -n $NAMESPACE
+    
+else
+    echo "Smoke tests failed. Rolling back..."
+    kubectl delete job smoke-test-$NEW_COLOR -n $NAMESPACE
+    exit 1
+fi
+
+# Cleanup
+kubectl delete job smoke-test-$NEW_COLOR -n $NAMESPACE
+```
+
+### 2. Canary Deployment with Istio
+```yaml
+# istio/canary-deployment.yml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: user-service
+spec:
+  hosts:
+  - user-service
+  http:
+  - match:
+    - headers:
+        canary:
+          exact: "true"
+    route:
+    - destination:
+        host: user-service
+        subset: canary
+  - route:
+    - destination:
+        host: user-service
+        subset: stable
+      weight: 90
+    - destination:
+        host: user-service
+        subset: canary
+      weight: 10
+
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: user-service
+spec:
+  host: user-service
+  subsets:
+  - name: stable
+    labels:
+      version: stable
+  - name: canary
+    labels:
+      version: canary
+```

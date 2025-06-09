@@ -1,0 +1,227 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Microservices Architecture Rules
+
+## Service Design Principles
+
+### 1. Single Responsibility
+- Each service owns one business domain
+- Clear bounded context per Domain-Driven Design
+- No shared databases between services
+- Independent deployment and scaling
+
+### 2. Data Consistency
+- Each service manages its own database
+- Use Saga pattern for distributed transactions
+- Eventual consistency over strong consistency
+- Event sourcing for audit trails
+
+### 3. Communication Patterns
+- Async communication via events (preferred)
+- Sync communication via REST APIs (when needed)
+- No direct database access between services
+- Circuit breaker pattern for resilience
+
+## Core Microservices
+
+### User Service
+**Port**: 8081  
+**Database**: PostgreSQL  
+**Responsibilities**:
+- JWT token management and validation
+- User authentication (login/logout)
+- Password management and reset
+- Role-based access control (RBAC)
+- OAuth2 integration with external providers
+
+**Key APIs**:
+- `POST /api/users/login` - User authentication
+- `POST /api/users/register` - User registration
+- `GET /api/users/profile` - Get user profile
+- `PUT /api/users/profile` - Update user profile
+
+### Customer Service
+**Port**: 8082  
+**Database**: PostgreSQL  
+**Responsibilities**:
+- Customer profile management (PII data)
+- Customer lifecycle events
+- Customer preferences and settings
+- Customer status management
+
+**Key APIs**:
+- `GET /api/customers/{id}` - Get customer details
+- `PUT /api/customers/{id}` - Update customer
+- `GET /api/customers/{id}/preferences` - Get preferences
+
+### Account Service
+**Port**: 8083  
+**Database**: PostgreSQL + Redis  
+**Responsibilities**:
+- Points balance management
+- Points earning and spending transactions
+- Points expiration handling
+- Transaction history
+
+**Key APIs**:
+- `GET /api/accounts/{customerId}/balance` - Get points balance
+- `POST /api/accounts/{customerId}/earn` - Add points
+- `POST /api/accounts/{customerId}/spend` - Spend points
+- `GET /api/accounts/{customerId}/transactions` - Transaction history
+
+### Earning Rules Service
+**Port**: 8084  
+**Database**: PostgreSQL + Redis  
+**Responsibilities**:
+- Rule engine implementation (Drools)
+- Rule evaluation and processing
+- Rule configuration and management
+- A/B testing for rules
+
+**Key APIs**:
+- `GET /api/earning-rules` - List all active rules
+- `POST /api/earning-rules/evaluate` - Evaluate rules for transaction
+- `POST /api/earning-rules` - Create new rule (admin)
+
+### Campaign Service
+**Port**: 8085  
+**Database**: PostgreSQL + Redis  
+**Responsibilities**:
+- Campaign and reward management
+- Coupon generation and validation
+- Reward eligibility checking
+- Campaign analytics
+
+**Key APIs**:
+- `GET /api/campaigns/available/{customerId}` - Available campaigns
+- `POST /api/campaigns/{id}/redeem` - Redeem reward
+- `GET /api/campaigns/{customerId}/purchased` - Purchased rewards
+
+### Transaction Service
+**Port**: 8086  
+**Database**: PostgreSQL  
+**Responsibilities**:
+- Purchase transaction processing
+- Transaction validation and enrichment
+- External system integration (ERP, POS)
+- Fraud detection
+
+**Key APIs**:
+- `POST /api/transactions` - Process new transaction
+- `GET /api/transactions/{id}` - Get transaction details
+- `PUT /api/transactions/{id}/validate` - Validate transaction
+
+### Level Service
+**Port**: 8087  
+**Database**: PostgreSQL + Redis  
+**Responsibilities**:
+- Customer tier/level management
+- Level calculation and upgrades
+- Level benefits configuration
+- Tier-based rewards
+
+**Key APIs**:
+- `GET /api/levels/{customerId}` - Get customer level
+- `GET /api/levels/{customerId}/benefits` - Get level benefits
+- `POST /api/levels/calculate` - Calculate level upgrades
+
+### Segment Service
+**Port**: 8088  
+**Database**: MongoDB + Redis  
+**Responsibilities**:
+- Customer segmentation (ML-based)
+- Behavioral analysis and scoring
+- Segment-based campaign targeting
+- Customer journey analytics
+
+**Key APIs**:
+- `GET /api/segments/{customerId}` - Get customer segments
+- `POST /api/segments/analyze` - Analyze customer behavior
+- `GET /api/segments/campaigns/{segmentId}` - Segment campaigns
+
+### Notification Service
+**Port**: 8089  
+**Database**: MongoDB  
+**Responsibilities**:
+- Multi-channel notifications (Email/SMS/Push)
+- Template management and personalization
+- Delivery tracking and retry logic
+- Notification preferences
+
+**Key APIs**:
+- `POST /api/notifications/send` - Send notification
+- `GET /api/notifications/{customerId}/history` - Notification history
+- `PUT /api/notifications/{customerId}/preferences` - Update preferences
+
+### Analytics Service
+**Port**: 8090  
+**Database**: MongoDB + Elasticsearch  
+**Responsibilities**:
+- Real-time analytics and dashboards
+- Business intelligence and reporting
+- Customer behavior analytics
+- Performance metrics
+
+**Key APIs**:
+- `GET /api/analytics/dashboard/{type}` - Get dashboard data
+- `GET /api/analytics/reports/{reportId}` - Generate reports
+- `GET /api/analytics/metrics` - System metrics
+
+## Service Communication
+
+### Event-Driven Communication
+```yaml
+Events Published:
+  user-service: [UserRegistered, UserLoggedIn, UserUpdated]
+  customer-service: [CustomerCreated, CustomerUpdated, CustomerStatusChanged]
+  account-service: [PointsEarned, PointsSpent, PointsExpired]
+  earning-rules-service: [RuleEvaluated, RuleApplied]
+  campaign-service: [RewardPurchased, CouponGenerated, CampaignActivated]
+  transaction-service: [TransactionProcessed, TransactionValidated]
+  level-service: [LevelChanged, LevelUpgraded]
+  segment-service: [CustomerSegmented, SegmentUpdated]
+
+Event Consumers:
+  notification-service: [ALL_EVENTS] # For notifications
+  analytics-service: [ALL_EVENTS] # For analytics
+  segment-service: [CustomerCreated, TransactionProcessed, PointsEarned]
+```
+
+### Synchronous Communication
+- Use only when immediate response is required
+- Implement circuit breaker pattern
+- Add timeout and retry mechanisms
+- Prefer async communication when possible
+
+## Database Strategy
+
+### Service-Specific Databases
+- Each service owns its data
+- No shared database schemas
+- Use database per service pattern
+- Implement data synchronization via events
+
+### Database Types
+- **PostgreSQL**: Transactional data (User, Customer, Account, Campaign)
+- **MongoDB**: Document-based data (Analytics, Notifications, Segments)
+- **Redis**: Caching, session storage, rate limiting
+- **Elasticsearch**: Search, logging, analytics
+
+## Deployment Strategy
+
+### Container Strategy
+- Each service in separate Docker container
+- Multi-stage builds for optimization
+- Health checks and readiness probes
+- Resource limits and requests
+
+### Kubernetes Deployment
+- Separate namespace per environment
+- Horizontal Pod Autoscaler (HPA)
+- Service mesh (Istio) for communication
+- ConfigMaps and Secrets for configuration
+
+

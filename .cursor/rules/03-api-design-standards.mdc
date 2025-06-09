@@ -1,0 +1,434 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# API Design Standards
+
+## RESTful API Design Principles
+
+### 1. Resource Naming Conventions
+- Use **plural nouns** for resource names
+- Use **lowercase** with **hyphens** for multi-word resources
+- Be **consistent** across all endpoints
+
+```
+✅ Good:
+GET /api/customers
+GET /api/earning-rules
+GET /api/loyalty-points
+
+❌ Bad:
+GET /api/customer
+GET /api/earningRules
+GET /api/loyaltypoint
+```
+
+### 2. HTTP Methods Usage
+```
+GET    - Retrieve resource(s) (safe, idempotent)
+POST   - Create new resource
+PUT    - Update entire resource (idempotent)
+PATCH  - Partial resource update
+DELETE - Remove resource (idempotent)
+```
+
+### 3. URL Structure Standards
+```
+Base Pattern: /api/{version}/{resource}/{id}/{sub-resource}
+
+Examples:
+GET    /api/v1/customers                    # List customers
+GET    /api/v1/customers/{id}               # Get customer
+POST   /api/v1/customers                    # Create customer
+PUT    /api/v1/customers/{id}               # Update customer
+DELETE /api/v1/customers/{id}               # Delete customer
+GET    /api/v1/customers/{id}/accounts      # Get customer accounts
+POST   /api/v1/customers/{id}/accounts      # Create account for customer
+```
+
+## API Response Standards
+
+### 1. Success Response Format
+```json
+{
+  "success": true,
+  "data": {
+    // Resource data here
+  },
+  "meta": {
+    "timestamp": "2024-01-15T10:30:00Z",
+    "version": "v1",
+    "requestId": "uuid"
+  }
+}
+```
+
+### 2. Error Response Format
+```json
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed for the request",
+    "details": [
+      {
+        "field": "email",
+        "message": "Email format is invalid"
+      }
+    ]
+  },
+  "meta": {
+    "timestamp": "2024-01-15T10:30:00Z",
+    "version": "v1",
+    "requestId": "uuid"
+  }
+}
+```
+
+### 3. Pagination Response Format
+```json
+{
+  "success": true,
+  "data": [
+    // Array of resources
+  ],
+  "meta": {
+    "pagination": {
+      "currentPage": 1,
+      "totalPages": 10,
+      "totalItems": 100,
+      "itemsPerPage": 10,
+      "hasNext": true,
+      "hasPrevious": false
+    },
+    "timestamp": "2024-01-15T10:30:00Z",
+    "requestId": "uuid"
+  }
+}
+```
+
+## HTTP Status Codes
+
+### Success Codes
+- **200 OK**: Successful GET, PUT, PATCH
+- **201 Created**: Successful POST
+- **204 No Content**: Successful DELETE
+
+### Client Error Codes
+- **400 Bad Request**: Invalid request format
+- **401 Unauthorized**: Authentication required
+- **403 Forbidden**: Access denied
+- **404 Not Found**: Resource not found
+- **409 Conflict**: Resource conflict
+- **422 Unprocessable Entity**: Validation errors
+
+### Server Error Codes
+- **500 Internal Server Error**: Unexpected server error
+- **502 Bad Gateway**: Upstream service error
+- **503 Service Unavailable**: Service temporarily down
+
+## API Versioning Strategy
+
+### 1. URL Path Versioning (Recommended)
+```
+/api/v1/customers
+/api/v2/customers
+```
+
+### 2. Version Header (Alternative)
+```
+GET /api/customers
+API-Version: v1
+```
+
+### 3. Version Support Rules
+- Support **minimum 2 versions** simultaneously
+- **Deprecation notice** 6 months before removal
+- **Backward compatibility** within major version
+- **Clear migration guide** for breaking changes
+
+## Authentication & Authorization
+
+### 1. JWT Token Format
+```json
+Header:
+Authorization: Bearer <jwt-token>
+
+JWT Payload:
+{
+  "sub": "user-id",
+  "iat": 1642251600,
+  "exp": 1642338000,
+  "roles": ["CUSTOMER", "ADMIN"],
+  "customerId": "customer-id",
+  "permissions": ["READ_PROFILE", "WRITE_PROFILE"]
+}
+```
+
+### 2. Role-Based Access Control
+```yaml
+Roles:
+  ADMIN:
+    - Full system access
+    - User management
+    - System configuration
+  
+  MANAGER:
+    - Customer management
+    - Campaign management
+    - Reports access
+  
+  CUSTOMER:
+    - Own profile access
+    - Points management
+    - Reward redemption
+  
+  POS_OPERATOR:
+    - Transaction processing
+    - Customer lookup
+    - Points redemption
+```
+
+## Request/Response Specifications
+
+### 1. Common Headers
+```
+Content-Type: application/json
+Accept: application/json
+Authorization: Bearer <token>
+X-Request-ID: <uuid>
+X-Correlation-ID: <uuid>
+X-API-Version: v1
+```
+
+### 2. Date/Time Format
+- Use **ISO 8601** format: `2024-01-15T10:30:00Z`
+- Always use **UTC timezone**
+- Include timezone offset when local time needed
+
+### 3. Decimal Number Format
+- Use **string representation** for monetary values
+- Include **currency code** for financial data
+```json
+{
+  "balance": "123.45",
+  "currency": "USD"
+}
+```
+
+## Query Parameters
+
+### 1. Filtering
+```
+GET /api/customers?status=active&level=gold
+GET /api/transactions?dateFrom=2024-01-01&dateTo=2024-01-31
+```
+
+### 2. Sorting
+```
+GET /api/customers?sort=firstName:asc,lastName:desc
+GET /api/transactions?sort=date:desc
+```
+
+### 3. Pagination
+```
+GET /api/customers?page=1&limit=20
+GET /api/customers?offset=0&limit=20
+```
+
+### 4. Field Selection
+```
+GET /api/customers?fields=id,firstName,lastName,email
+```
+
+## Specific API Endpoints
+
+### Customer APIs
+```yaml
+GET /api/v1/customers:
+  description: List customers with filtering and pagination
+  parameters:
+    - status: [active, inactive, suspended]
+    - level: [bronze, silver, gold, platinum]
+    - segment: [vip, regular, new]
+    - page: integer
+    - limit: integer
+    - sort: string
+
+GET /api/v1/customers/{id}:
+  description: Get customer details
+  response: CustomerDetailsDTO
+
+PUT /api/v1/customers/{id}:
+  description: Update customer profile
+  request: UpdateCustomerRequest
+  response: CustomerDetailsDTO
+
+GET /api/v1/customers/{id}/points:
+  description: Get customer points balance
+  response: PointsBalanceDTO
+
+POST /api/v1/customers/{id}/points/earn:
+  description: Add points to customer account
+  request: EarnPointsRequest
+  response: PointsTransactionDTO
+```
+
+### Campaign APIs
+```yaml
+GET /api/v1/campaigns:
+  description: List available campaigns
+  parameters:
+    - customerId: string (for personalized results)
+    - status: [active, inactive, coming_soon]
+    - type: [discount, gift, event, delivery]
+
+GET /api/v1/campaigns/{id}:
+  description: Get campaign details
+  response: CampaignDetailsDTO
+
+POST /api/v1/campaigns/{id}/redeem:
+  description: Redeem campaign reward
+  request: RedeemRewardRequest
+  response: CouponDTO
+
+GET /api/v1/customers/{customerId}/campaigns/purchased:
+  description: Get customer's purchased rewards
+  response: PurchasedRewardsDTO[]
+```
+
+### Transaction APIs
+```yaml
+POST /api/v1/transactions:
+  description: Process new transaction
+  request: ProcessTransactionRequest
+  response: TransactionDTO
+
+GET /api/v1/transactions/{id}:
+  description: Get transaction details
+  response: TransactionDetailsDTO
+
+GET /api/v1/customers/{customerId}/transactions:
+  description: Get customer transaction history
+  parameters:
+    - dateFrom: date
+    - dateTo: date
+    - type: [purchase, points_earn, points_spend]
+    - page: integer
+    - limit: integer
+```
+
+## Data Transfer Objects (DTOs)
+
+### 1. Customer DTOs
+```java
+public class CustomerDetailsDTO {
+    private String customerId;
+    private String email;
+    private String firstName;
+    private String lastName;
+    private String phone;
+    private LocalDate dateOfBirth;
+    private String status;
+    private String level;
+    private LocalDateTime registrationDate;
+    private LocalDateTime lastLoginDate;
+    private AddressDTO address;
+    private PreferencesDTO preferences;
+}
+
+public class UpdateCustomerRequest {
+    @NotBlank
+    private String firstName;
+    
+    @NotBlank
+    private String lastName;
+    
+    @Email
+    private String email;
+    
+    @Pattern(regexp = "^\\+?[1-9]\\d{1,14}$")
+    private String phone;
+    
+    private LocalDate dateOfBirth;
+    private AddressDTO address;
+    private PreferencesDTO preferences;
+}
+```
+
+### 2. Points DTOs
+```java
+public class PointsBalanceDTO {
+    private String customerId;
+    private BigDecimal activePoints;
+    private BigDecimal expiredPoints;
+    private BigDecimal totalEarned;
+    private BigDecimal totalSpent;
+    private LocalDateTime lastUpdated;
+    private List<PointsExpirationDTO> expirations;
+}
+
+public class EarnPointsRequest {
+    @NotNull
+    @DecimalMin("0.01")
+    private BigDecimal points;
+    
+    @NotBlank
+    private String reason;
+    
+    private String transactionId;
+    private Map<String, Object> metadata;
+}
+```
+
+## API Documentation
+
+### 1. OpenAPI Specification
+- Use **OpenAPI 3.0** specification
+- Include detailed **descriptions** and **examples**
+- Document **all parameters** and **response codes**
+- Provide **schema definitions** for all DTOs
+
+### 2. Swagger UI Integration
+- Auto-generated from OpenAPI specs
+- Include **"Try it out"** functionality
+- Provide **authentication** for testing
+- Include **example requests/responses**
+
+### 3. API Testing
+- **Postman collections** for manual testing
+- **Automated API tests** in CI/CD pipeline
+- **Contract testing** between services
+- **Performance testing** for critical endpoints
+
+## Rate Limiting
+
+### 1. Rate Limit Headers
+```
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 999
+X-RateLimit-Reset: 1642251600
+```
+
+### 2. Rate Limit Rules
+```yaml
+Public Endpoints: 100 requests/minute
+Authenticated Users: 1000 requests/minute
+Admin Users: 5000 requests/minute
+System Integration: 10000 requests/minute
+```
+
+### 3. Rate Limit Response
+```json
+{
+  "success": false,
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Too many requests. Try again later."
+  },
+  "meta": {
+    "retryAfter": 60
+  }
+}
+```
