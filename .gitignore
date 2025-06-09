@@ -1,0 +1,106 @@
+# Java
+*.class
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
+hs_err_pid*
+replay_pid*
+
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE - IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+.idea_modules/
+
+# IDE - Eclipse
+.metadata
+bin/
+tmp/
+*.tmp
+*.bak
+*.swp
+*~.nib
+local.properties
+.settings/
+.loadpath
+.recommenders
+.project
+.externalToolBuilders/
+*.launch
+.classpath
+.factorypath
+.buildpath
+.target
+
+# IDE - VS Code
+.vscode/
+*.code-workspace
+
+# Cursor Editor
+.cursor
+
+# Spring Boot
+spring-boot-*.pid
+.springBeans
+.spring-dependencies
+
+# Logs
+logs/
+*.log
+log/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Microservices specific
+config-repo/
+service-registry/
+api-gateway/
+
+# OS specific
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Node (for frontend services)
+node_modules/
+npm-debug.log
+yarn-error.log
+yarn-debug.log
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Misc
+*.swp
+*.swo
+*~
+.nfs*
+
+
