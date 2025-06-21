@@ -1,0 +1,273 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database cho Event Store và Read Models
+  postgres:
+    image: postgres:15-alpine
+    container_name: loyalty-postgres
+    environment:
+      POSTGRES_DB: loyalty_db
+      POSTGRES_USER: loyalty_user
+      POSTGRES_PASSWORD: loyalty_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - loyalty-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loyalty_user -d loyalty_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis cho Caching và Session Storage  
+  redis:
+    image: redis:7-alpine
+    container_name: loyalty-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - loyalty-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Zookeeper cho Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: loyalty-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - loyalty-network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: loyalty-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
+      KAFKA_DELETE_TOPIC_ENABLE: true
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - loyalty-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Kafka UI cho monitoring
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: loyalty-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: loyalty-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - loyalty-network
+
+  # Schema Registry cho Kafka
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    container_name: loyalty-schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    networks:
+      - loyalty-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Discovery Server (Eureka)
+  discovery-server:
+    build:
+      context: ./discovery-server
+      dockerfile: Dockerfile
+    container_name: loyalty-discovery-server
+    ports:
+      - "8761:8761"
+    networks:
+      - loyalty-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8761/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Config Server
+  config-server:
+    build:
+      context: ./config-server
+      dockerfile: Dockerfile
+    container_name: loyalty-config-server
+    depends_on:
+      discovery-server:
+        condition: service_healthy
+    ports:
+      - "8888:8888"
+    environment:
+      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://discovery-server:8761/eureka
+    networks:
+      - loyalty-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: loyalty-api-gateway
+    depends_on:
+      discovery-server:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://discovery-server:8761/eureka
+      SPRING_CLOUD_CONFIG_URI: http://config-server:8888
+    networks:
+      - loyalty-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Loyalty Service (Main Service)
+  loyalty-service:
+    build:
+      context: ./loyalty-service
+      dockerfile: Dockerfile
+    container_name: loyalty-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/loyalty_db
+      SPRING_DATASOURCE_USERNAME: loyalty_user
+      SPRING_DATASOURCE_PASSWORD: loyalty_password
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://discovery-server:8761/eureka
+      SPRING_CLOUD_CONFIG_URI: http://config-server:8888
+      AXON_EVENTSTORE_TYPE: jpa
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,metrics,prometheus
+    networks:
+      - loyalty-network
+    volumes:
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Prometheus cho Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: loyalty-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - loyalty-network
+
+  # Grafana cho Dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: loyalty-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - loyalty-network
+
+networks:
+  loyalty-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  kafka_data:
+  prometheus_data:
+  grafana_data:

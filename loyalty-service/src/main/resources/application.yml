@@ -1,0 +1,383 @@
+server:
+  port: 8082
+  servlet:
+    context-path: /loyalty-service
+
+spring:
+  application:
+    name: loyalty-service
+  
+  profiles:
+    active: dev
+  
+  # Database Configuration
+  datasource:
+    url: jdbc:postgresql://localhost:5432/loyalty_db
+    username: loyalty_user
+    password: loyalty_password
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      connection-timeout: 20000
+      minimum-idle: 10
+      maximum-pool-size: 50
+      idle-timeout: 300000
+      max-lifetime: 1200000
+      auto-commit: true
+      pool-name: LoyaltyCP
+      data-source-properties:
+        cachePrepStmts: true
+        prepStmtCacheSize: 250
+        prepStmtCacheSqlLimit: 2048
+  
+  # JPA/Hibernate Configuration
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: validate
+      naming:
+        physical-strategy: org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl
+    properties:
+      hibernate:
+        format_sql: false
+        show_sql: false
+        use_sql_comments: false
+        jdbc:
+          batch_size: 50
+          lob.non_contextual_creation: true
+        order_inserts: true
+        order_updates: true
+        connection:
+          provider_disables_autocommit: true
+    show-sql: false
+  
+  # Flyway Configuration
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+    validate-on-migrate: true
+  
+  # Redis Configuration
+  redis:
+    host: localhost
+    port: 6379
+    timeout: 2000ms
+    lettuce:
+      pool:
+        max-active: 8
+        max-idle: 8
+        min-idle: 0
+        max-wait: -1ms
+    database: 0
+  
+  # Kafka Configuration
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+      batch-size: 16384
+      linger-ms: 5
+      buffer-memory: 33554432
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+    consumer:
+      group-id: loyalty-service-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+      max-poll-records: 500
+      properties:
+        isolation.level: read_committed
+    listener:
+      ack-mode: manual_immediate
+      concurrency: 3
+  
+  # Cloud Configuration
+  cloud:
+    config:
+      uri: http://localhost:8888
+      fail-fast: true
+      retry:
+        initial-interval: 1000
+        multiplier: 1.1
+        max-attempts: 6
+  
+  # Cache Configuration
+  cache:
+    type: redis
+    redis:
+      time-to-live: PT1H
+      cache-null-values: false
+
+# Eureka Configuration
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+    fetch-registry: true
+    register-with-eureka: true
+    healthcheck:
+      enabled: true
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 30
+    lease-expiration-duration-in-seconds: 90
+    metadata-map:
+      zone: zone1
+      version: 1.0.0
+
+# Axon Framework Configuration
+axon:
+  eventhandling:
+    processors:
+      member-projection-processor:
+        mode: tracking
+        source: eventStore
+        batch-size: 100
+        initial-segment-count: 4
+        thread-count: 4
+      wallet-projection-processor:
+        mode: tracking
+        source: eventStore
+        batch-size: 100
+        initial-segment-count: 4
+        thread-count: 4
+      transaction-projection-processor:
+        mode: tracking
+        source: eventStore
+        batch-size: 100
+        initial-segment-count: 4
+        thread-count: 4
+      analytics-processor:
+        mode: tracking
+        source: eventStore
+        batch-size: 50
+        initial-segment-count: 2
+        thread-count: 2
+  
+  serializer:
+    general: jackson
+    events: jackson
+    messages: jackson
+  
+  # Kafka Extension Configuration
+  kafka:
+    client-id: loyalty-service
+    default-topic: loyalty.events
+    publisher:
+      confirmation-mode: wait_for_ack
+    fetcher:
+      poll-timeout: 3000
+    consumer:
+      event-processor-mode: tracking
+
+# Management/Actuator Configuration
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,env,configprops,axon
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when_authorized
+      show-components: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+  health:
+    redis:
+      enabled: true
+    db:
+      enabled: true
+    kafka:
+      enabled: true
+  info:
+    env:
+      enabled: true
+    build:
+      enabled: true
+    git:
+      enabled: true
+
+# Logging Configuration
+logging:
+  level:
+    com.ndc.loyalty: INFO
+    org.axonframework: WARN
+    org.springframework.kafka: WARN
+    org.hibernate: WARN
+    org.springframework.cache: WARN
+    org.springframework.data.redis: WARN
+    root: INFO
+  pattern:
+    console: '%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n'
+    file: '%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n'
+  file:
+    name: logs/loyalty-service.log
+    max-size: 10MB
+    max-history: 30
+
+# Application Specific Configuration
+loyalty:
+  member:
+    default-tier: Bronze
+    email-verification-timeout: PT24H
+    phone-verification-timeout: PT10M
+    account-lock-duration: PT30M
+    max-failed-login-attempts: 5
+  
+  wallet:
+    default-currency: POINTS
+    point-expiry-months: 12
+    max-balance: 1000000
+    transfer-limit-per-day: 10000
+  
+  tier:
+    calculation-schedule: "0 0 2 * * ?"  # Daily at 2 AM
+    upgrade-effective-delay: PT1H
+  
+  transaction:
+    matching-timeout: PT5M
+    processing-timeout: PT30S
+    auto-match-enabled: true
+  
+  notification:
+    enabled: true
+    email:
+      enabled: true
+      template-path: templates/email/
+    sms:
+      enabled: true
+      provider: twilio
+    push:
+      enabled: true
+      provider: firebase
+
+# Security Configuration
+security:
+  jwt:
+    secret: loyalty-service-jwt-secret-key-very-long-and-secure
+    expiration: 86400000  # 24 hours
+  cors:
+    allowed-origins: "*"
+    allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+    allowed-headers: "*"
+
+# Feign Configuration
+feign:
+  client:
+    config:
+      default:
+        connect-timeout: 5000
+        read-timeout: 10000
+        logger-level: BASIC
+  circuitbreaker:
+    enabled: true
+
+# Resilience4j Configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      default:
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+  retry:
+    instances:
+      default:
+        max-attempts: 3
+        wait-duration: 500ms
+  timelimiter:
+    instances:
+      default:
+        timeout-duration: 10s
+
+# OpenAPI/Swagger Configuration
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+  show-actuator: true
+
+---
+# Docker Profile
+spring:
+  config:
+    activate:
+      on-profile: docker
+  
+  datasource:
+    url: jdbc:postgresql://postgres:5432/loyalty_db
+  
+  kafka:
+    bootstrap-servers: kafka:29092
+  
+  redis:
+    host: redis
+  
+  cloud:
+    config:
+      uri: http://config-server:8888
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://discovery-server:8761/eureka/
+
+---
+# Test Profile
+spring:
+  config:
+    activate:
+      on-profile: test
+  
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+  
+  kafka:
+    producer:
+      bootstrap-servers: ${spring.embedded.kafka.brokers}
+    consumer:
+      bootstrap-servers: ${spring.embedded.kafka.brokers}
+  
+  redis:
+    host: localhost
+    port: 6370  # Different port for test
+  
+  flyway:
+    enabled: false
+
+axon:
+  eventhandling:
+    processors:
+      member-projection-processor:
+        mode: subscribing
+      wallet-projection-processor:
+        mode: subscribing
+      transaction-projection-processor:
+        mode: subscribing
+      analytics-processor:
+        mode: subscribing
+
+logging:
+  level:
+    com.ndc.loyalty: DEBUG
+    org.axonframework: DEBUG
